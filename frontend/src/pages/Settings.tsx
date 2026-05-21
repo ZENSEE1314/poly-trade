@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { api } from "../lib/api";
 
 export default function Settings() {
@@ -79,7 +79,7 @@ export default function Settings() {
   );
 }
 
-function Section({ title, children }: any) {
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div style={{ background: "#0d131c", border: "1px solid #1d2735",
                   borderRadius: 12, padding: 18, marginBottom: 16, maxWidth: 620 }}>
@@ -88,7 +88,7 @@ function Section({ title, children }: any) {
     </div>
   );
 }
-function Toggle({ label, value, onChange }: any) {
+function Toggle({ label, value, onChange }: { label: string; value: boolean; onChange: (v: boolean) => void }) {
   return (
     <label style={{ display: "flex", alignItems: "center", padding: "8px 0", cursor: "pointer" }}>
       <input type="checkbox" checked={value} onChange={e => onChange(e.target.checked)}
@@ -97,7 +97,7 @@ function Toggle({ label, value, onChange }: any) {
     </label>
   );
 }
-function Slider({ label, min, max, step, value, onChange }: any) {
+function Slider({ label, min, max, step, value, onChange }: { label: string; min: number; max: number; step: number; value: number; onChange: (v: number) => void }) {
   return (
     <div style={{ marginTop: 14 }}>
       <div style={{ fontSize: 13 }}>{label}</div>

@@ -65,7 +65,7 @@ export default function Wallet() {
   );
 }
 
-function Field({ label, value, set, type = "text" }: any) {
+function Field({ label, value, set, type = "text" }: { label: string; value: string; set: (v: string) => void; type?: string }) {
   return (
     <div style={{ marginTop: 12 }}>
       <div style={{ fontSize: 12, color: "#9aa6b2" }}>{label}</div>
