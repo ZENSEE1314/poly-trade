@@ -39,6 +39,8 @@ export const api = {
   me: { wallet: () => req<any>("/api/wallet") },
   linkApiKey: (p: any) => req("/api/wallet/api-key", { method: "POST", body: JSON.stringify(p) }),
   linkPrivateKey: (p: any) => req("/api/wallet/private-key", { method: "POST", body: JSON.stringify(p) }),
+  connectMetaMask: (p: { address: string; signature: string; timestamp: number; nonce: number }) =>
+    req("/api/wallet/connect-metamask", { method: "POST", body: JSON.stringify(p) }),
   unlinkWallet: () => req("/api/wallet", { method: "DELETE" }),
   getProfile: () => req<any>("/api/profile"),
   updateProfile: (p: any) => req("/api/profile", { method: "PATCH", body: JSON.stringify(p) }),

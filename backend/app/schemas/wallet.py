@@ -24,6 +24,17 @@ class WalletPrivateKeyIn(BaseModel):
     ack_risk: bool
 
 
+class MetaMaskConnectIn(BaseModel):
+    """One-click wallet link via MetaMask.
+    Frontend signs "{timestamp}{nonce}" with personal_sign; backend exchanges
+    that L1 signature for Polymarket L2 API credentials server-side."""
+
+    address: str
+    signature: str   # 0x-prefixed hex from MetaMask personal_sign
+    timestamp: int   # Unix seconds used in the signed message
+    nonce: int = 0   # Always 0 for first key creation
+
+
 class WalletOut(BaseModel):
     address: str
     mode: str

@@ -1,5 +1,6 @@
 import json
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -7,8 +8,10 @@ from ..core.config import get_settings
 from ..core.kms import vault
 from ..db.session import get_db
 from ..models import User, Wallet
-from ..schemas.wallet import WalletApiKeyIn, WalletPrivateKeyIn, WalletOut
+from ..schemas.wallet import MetaMaskConnectIn, WalletApiKeyIn, WalletPrivateKeyIn, WalletOut
 from .deps import get_current_user
+
+CLOB_HOST = "https://clob.polymarket.com"
 
 router = APIRouter(prefix="/api/wallet", tags=["wallet"])
 
@@ -75,6 +78,64 @@ def link_via_private_key(
         mode="private_key",
         sealed=sealed.to_dict(),
         funder=payload.funder,
+    )
+    db.add(w)
+    db.commit()
+    db.refresh(w)
+    return WalletOut(address=w.address, mode=w.mode, funder=w.funder, is_active=w.is_active)
+
+
+@router.post("/connect-metamask", response_model=WalletOut)
+async def connect_via_metamask(
+    payload: MetaMaskConnectIn,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """One-click MetaMask wallet link.
+
+    The frontend asks MetaMask to sign "{timestamp}{nonce}" via personal_sign,
+    then POSTs the result here. We forward it as Polymarket L1 auth headers to
+    POST /auth/api-key, which returns L2 API credentials (key/secret/passphrase)
+    without us ever seeing the user's private key.
+    """
+    poly_headers = {
+        "POLY_ADDRESS": payload.address,
+        "POLY_SIGNATURE": payload.signature,
+        "POLY_TIMESTAMP": str(payload.timestamp),
+        "POLY_NONCE": str(payload.nonce),
+    }
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(f"{CLOB_HOST}/auth/api-key", headers=poly_headers)
+
+    if r.status_code != 200:
+        raise HTTPException(400, detail=f"Polymarket rejected the signature: {r.text}")
+
+    data = r.json()
+    # Polymarket returns {apiKey, secret, passphrase}
+    api_key = data.get("apiKey") or data.get("api_key")
+    api_secret = data.get("secret") or data.get("api_secret")
+    api_passphrase = data.get("passphrase") or data.get("api_passphrase")
+
+    if not all([api_key, api_secret, api_passphrase]):
+        raise HTTPException(500, detail="Polymarket returned incomplete credentials")
+
+    secret_json = json.dumps({
+        "api_key": api_key,
+        "api_secret": api_secret,
+        "api_passphrase": api_passphrase,
+    })
+    sealed = vault.seal(secret_json, aad=str(user.id).encode())
+
+    if user.wallet:
+        db.delete(user.wallet)
+        db.flush()
+
+    w = Wallet(
+        user_id=user.id,
+        address=payload.address,
+        mode="api_key",
+        sealed=sealed.to_dict(),
     )
     db.add(w)
     db.commit()
