@@ -1,6 +1,7 @@
 import json
 
 import httpx
+from eth_utils import to_checksum_address
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -98,15 +99,26 @@ async def connect_via_metamask(
     POST /auth/api-key, which returns L2 API credentials (key/secret/passphrase)
     without us ever seeing the user's private key.
     """
+    # MetaMask returns lowercase addresses; Polymarket requires EIP-55 checksum format.
+    try:
+        checksummed = to_checksum_address(payload.address)
+    except ValueError:
+        raise HTTPException(400, detail="Invalid Ethereum address")
+
     poly_headers = {
-        "POLY_ADDRESS": payload.address,
+        "POLY_ADDRESS": checksummed,
         "POLY_SIGNATURE": payload.signature,
         "POLY_TIMESTAMP": str(payload.timestamp),
         "POLY_NONCE": str(payload.nonce),
     }
 
     async with httpx.AsyncClient(timeout=15.0) as client:
-        r = await client.post(f"{CLOB_HOST}/auth/api-key", headers=poly_headers)
+        r = await client.post(
+            f"{CLOB_HOST}/auth/api-key",
+            headers=poly_headers,
+            # NOTE: some Polymarket endpoints gate on Content-Type even for header-only auth
+            json={},
+        )
 
     if r.status_code != 200:
         raise HTTPException(400, detail=f"Polymarket rejected the signature: {r.text}")
@@ -133,7 +145,7 @@ async def connect_via_metamask(
 
     w = Wallet(
         user_id=user.id,
-        address=payload.address,
+        address=checksummed,
         mode="api_key",
         sealed=sealed.to_dict(),
     )
