@@ -5,7 +5,7 @@
     "dockerfilePath": "frontend/Dockerfile.prod"
   },
   "deploy": {
-    "startCommand": "sh -c \"envsubst '$PORT' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'\"",
+    "startCommand": "sh -c \"envsubst '$PORT $BACKEND_URL' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'\"",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }

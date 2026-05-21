@@ -1,4 +1,6 @@
-const BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+// Empty string = relative URL. Nginx proxies /api/* to the backend internally.
+// Set VITE_API_BASE to override (e.g. for local dev pointing at a remote backend).
+const BASE = import.meta.env.VITE_API_BASE || "";
 
 function token(): string | null {
   return localStorage.getItem("token");
