@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     POLYMARKET_CHAIN_ID: int = 137
 
     LIVE_TRADING: bool = False
+    ALLOW_PK_MODE: bool = False
     GLOBAL_MAX_DAILY_USDC: float = 100.0
     MIN_EDGE: float = 0.04
 

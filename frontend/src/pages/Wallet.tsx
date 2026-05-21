@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { api } from "../lib/api";
 
 export default function Wallet() {
@@ -6,7 +6,10 @@ export default function Wallet() {
   const [form, setForm] = useState({ address: "", funder: "", api_key: "", api_secret: "", api_passphrase: "" });
   const [msg, setMsg] = useState("");
 
-  async function refresh() { setWallet(await api.me.wallet()); }
+  async function refresh() {
+    try { setWallet(await api.me.wallet()); }
+    catch (e: any) { setMsg("Error: " + e.message); }
+  }
   useEffect(() => { refresh(); }, []);
 
   async function link() {
@@ -74,6 +77,6 @@ function Field({ label, value, set, type = "text" }: any) {
     </div>
   );
 }
-const card: React.CSSProperties = { background: "#0d131c", border: "1px solid #1d2735", borderRadius: 12, padding: 18, maxWidth: 560 };
-const btnPrimary: React.CSSProperties = { marginTop: 18, padding: "10px 18px", background: "#388bfd", color: "#fff", border: 0, borderRadius: 8, cursor: "pointer" };
-const btnDanger: React.CSSProperties = { marginTop: 14, padding: "8px 14px", background: "transparent", color: "#ff6b6b", border: "1px solid #5d2a2a", borderRadius: 8, cursor: "pointer" };
+const card: CSSProperties = { background: "#0d131c", border: "1px solid #1d2735", borderRadius: 12, padding: 18, maxWidth: 560 };
+const btnPrimary: CSSProperties = { marginTop: 18, padding: "10px 18px", background: "#388bfd", color: "#fff", border: 0, borderRadius: 8, cursor: "pointer" };
+const btnDanger: CSSProperties = { marginTop: 14, padding: "8px 14px", background: "transparent", color: "#ff6b6b", border: "1px solid #5d2a2a", borderRadius: 8, cursor: "pointer" };

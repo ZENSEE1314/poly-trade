@@ -88,7 +88,7 @@ def decide(
     bank = max(1.0, profile.daily_loss_limit_usdc - loss_24h)
     stake = min(profile.max_stake_usdc, bank * aggressiveness * kelly * 4)
     # ALSO enforce a hard global cap regardless of user setting
-    stake = min(stake, settings.GLOBAL_MAX_DAILY_USDC - loss_24h)
+    stake = min(stake, max(0.0, settings.GLOBAL_MAX_DAILY_USDC - loss_24h))
 
     if stake < 1.0:
         return TradeDecision(False, None, 0, 0, f"stake too small ({stake:.2f})")

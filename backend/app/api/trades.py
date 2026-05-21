@@ -12,7 +12,11 @@ router = APIRouter(prefix="/api", tags=["trades"])
 
 
 @router.get("/predictions/latest")
-def latest_predictions(limit: int = 20, db: Session = Depends(get_db)):
+def latest_predictions(
+    limit: int = 20,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     rows = (
         db.execute(select(Prediction).order_by(desc(Prediction.id)).limit(limit))
         .scalars()

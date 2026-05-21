@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { api } from "../lib/api";
 
@@ -35,7 +35,7 @@ export default function Dashboard() {
       ) : <p style={{ color: "#9aa6b2" }}>Waiting for first forecast (≤60s)…</p>}
 
       {latest && (
-        <div style={card("margin-top:18px")}>
+        <div style={card(18)}>
           <h3 style={{ marginTop: 0 }}>Swarm Votes</h3>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
             <thead><tr style={{ color: "#9aa6b2", textAlign: "left" }}>
@@ -55,7 +55,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      <div style={card("margin-top:18px")}>
+      <div style={card(18)}>
         <h3 style={{ marginTop: 0 }}>P(Up) — last {preds.length} windows</h3>
         <div style={{ height: 220 }}>
           <ResponsiveContainer>
@@ -72,7 +72,7 @@ export default function Dashboard() {
       </div>
 
       {stats && (
-        <div style={card("margin-top:18px")}>
+        <div style={card(18)}>
           <h3 style={{ marginTop: 0 }}>Your 7-day stats</h3>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
             <Tile label="Trades" value={stats.trades_7d} />
@@ -102,8 +102,6 @@ function Pill({ vote }: { vote: string }) {
   return <span style={{ background: c + "22", color: c, padding: "2px 8px", borderRadius: 999, fontSize: 12 }}>{vote}</span>;
 }
 function pct(x: number) { return `${(x * 100).toFixed(1)}%`; }
-function card(extra = ""): React.CSSProperties {
-  const o: any = { background: "#0d131c", border: "1px solid #1d2735", borderRadius: 12, padding: 18 };
-  if (extra.includes("margin-top")) o.marginTop = parseInt(extra.split(":")[1]);
-  return o;
+function card(marginTop?: number): CSSProperties {
+  return { background: "#0d131c", border: "1px solid #1d2735", borderRadius: 12, padding: 18, marginTop };
 }

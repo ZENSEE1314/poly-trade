@@ -33,7 +33,10 @@ export default function Settings() {
                   if (!v && !confirm("Disable paper mode? Real money will be at risk."))
                     return;
                   set("paper_only", v);
-                  save({ paper_only: v, live_trading_acknowledged: !v });
+                  // Only send live_trading_acknowledged=true when switching TO live;
+                  // never clear it when re-enabling paper mode.
+                  const extra = v ? { paper_only: true } : { paper_only: false, live_trading_acknowledged: true };
+                  save(extra);
                 }} />
       </Section>
 

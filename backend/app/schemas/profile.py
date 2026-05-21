@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 class ProfileOut(BaseModel):
     auto_trade_enabled: bool
     paper_only: bool
+    live_trading_acknowledged: bool
     risk_level: int
     max_stake_usdc: float
     daily_loss_limit_usdc: float

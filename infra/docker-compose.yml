@@ -51,7 +51,13 @@ services:
       worker: { condition: service_started }
 
   frontend:
-    build: ../frontend
+    build:
+      context: ../frontend
+      # VITE_API_BASE must be a build ARG when using Dockerfile.prod (Vite bakes it
+      # at compile time). The runtime environment entry below covers the dev Dockerfile
+      # (npm run dev reads it at server start).
+      args:
+        VITE_API_BASE: http://localhost:8000
     environment:
       VITE_API_BASE: http://localhost:8000
     ports: ["5173:5173"]

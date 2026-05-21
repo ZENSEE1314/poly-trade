@@ -31,10 +31,15 @@ class MasterKeyProvider:
 
 class EnvMasterKey(MasterKeyProvider):
     def get_key(self) -> bytes:
-        b64 = get_settings().MASTER_KMS_KEY_B64
+        cfg = get_settings()
+        b64 = cfg.MASTER_KMS_KEY_B64
         if not b64 or b64.startswith("changeme"):
-            # Generate an ephemeral key for first-boot dev only. WARNING:
-            # this will rotate every process restart — DO NOT use in prod.
+            if cfg.APP_ENV == "production":
+                raise RuntimeError(
+                    "MASTER_KMS_KEY_B64 must be set in production. "
+                    "Generate one with: python -c \"import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())\""
+                )
+            # Ephemeral key for dev only — rotates on every restart.
             return AESGCM.generate_key(bit_length=256)
         return base64.b64decode(b64)
 

@@ -3,6 +3,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from ..core.config import get_settings
 from ..core.kms import vault
 from ..db.session import get_db
 from ..models import User, Wallet
@@ -59,9 +60,7 @@ def link_via_private_key(
 ):
     """HIGH RISK. Encrypts EOA private key under envelope encryption.
     Disabled at deployment time via env flag in production."""
-    import os
-
-    if os.getenv("ALLOW_PK_MODE", "false").lower() != "true":
+    if not get_settings().ALLOW_PK_MODE:
         raise HTTPException(403, "Private-key mode is disabled on this deployment")
     if not payload.ack_risk:
         raise HTTPException(400, "Must acknowledge risk")

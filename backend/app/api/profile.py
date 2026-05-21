@@ -13,6 +13,7 @@ def _to_out(p: TradingProfile) -> ProfileOut:
     return ProfileOut(
         auto_trade_enabled=p.auto_trade_enabled,
         paper_only=p.paper_only,
+        live_trading_acknowledged=p.live_trading_acknowledged,
         risk_level=p.risk_level,
         max_stake_usdc=p.max_stake_usdc,
         daily_loss_limit_usdc=p.daily_loss_limit_usdc,
@@ -25,6 +26,8 @@ def _to_out(p: TradingProfile) -> ProfileOut:
 
 @router.get("", response_model=ProfileOut)
 def get_profile(user: User = Depends(get_current_user)):
+    if not user.profile:
+        raise HTTPException(404, "Profile not found")
     return _to_out(user.profile)
 
 
@@ -34,6 +37,8 @@ def update_profile(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    if not user.profile:
+        raise HTTPException(404, "Profile not found")
     p = user.profile
     data = payload.model_dump(exclude_unset=True)
 
