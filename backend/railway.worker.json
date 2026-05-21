@@ -1,9 +1,8 @@
 {
-  "$schema": "https://railway.app/railway.schema.json",
+  "$schema": "https://railway.com/railway.schema.json",
   "build": {
     "builder": "DOCKERFILE",
-    "dockerfilePath": "backend/Dockerfile",
-    "buildContext": "backend"
+    "dockerfilePath": "backend/Dockerfile"
   },
   "deploy": {
     "startCommand": "celery -A app.workers.celery_app.celery_app worker --loglevel=INFO --concurrency=2",

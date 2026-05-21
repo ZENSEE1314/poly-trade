@@ -1,16 +1,19 @@
+# Build from REPO ROOT context so Railway's default works.
 # ── Build stage ────────────────────────────────────────────────────────
 FROM node:20-alpine AS build
 WORKDIR /app
-COPY package.json ./
+COPY frontend/package.json ./
 RUN npm install
-COPY . .
-# VITE_API_BASE is baked in at build time. Override with Railway build arg.
+COPY frontend/ ./
 ARG VITE_API_BASE=""
 ENV VITE_API_BASE=$VITE_API_BASE
 RUN npm run build
 
 # ── Runtime: nginx ─────────────────────────────────────────────────────
 FROM nginx:1.27-alpine
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY frontend/nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=build /app/dist /usr/share/nginx/html
+# Railway injects $PORT — render it into the nginx conf at boot
+ENV PORT=8080
 EXPOSE 8080
+CMD ["sh", "-c", "envsubst '$PORT' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]
