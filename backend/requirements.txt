@@ -11,6 +11,10 @@ celery[redis]==5.4.0
 httpx==0.27.2
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
+# bcrypt 4.x added a strict >72-byte check that breaks passlib 1.7.4's internal
+# detect_wrap_bug probe (which intentionally hashes a >72-byte test password).
+# Pin to the last 3.x release until passlib ships a compatible version.
+bcrypt==3.2.2
 cryptography==43.0.3
 python-multipart==0.0.12
 numpy==2.1.3
