@@ -16,23 +16,20 @@ forecasting:
       - Each persona returns {vote ∈ {up, down, neutral}, confidence ∈ [0,1]}
       - Final swarm_p_up = soft-Bayesian update on the ML prior using votes
 
-If no OPENAI_API_KEY is configured the swarm runs in a *deterministic
-rule-engine* mode that emulates the personas with simple heuristics.
+LLM backend is selected via LLM_PROVIDER (ollama | openai | none). If unavailable
+the personas fall back to a deterministic rule-engine that mirrors their styles.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import math
 from dataclasses import dataclass
-from typing import Any
 
-from openai import AsyncOpenAI
-
-from ..core.config import get_settings
+from .llm import get_llm
 
 log = logging.getLogger(__name__)
-settings = get_settings()
 
 
 PERSONAS = [
@@ -90,7 +87,7 @@ class Vote:
 # ───────────────────────── deterministic fallback ─────────────────────────
 
 def _heuristic_vote(persona: str, feats: dict) -> Vote:
-    """Mirror each persona's style with simple rules — used when no LLM key."""
+    """Mirror each persona's style with simple rules — used when no LLM."""
     ret_5 = feats.get("ret_5m", 0)
     ret_15 = feats.get("ret_15m", 0)
     ret_60 = feats.get("ret_60m", 0)
@@ -103,7 +100,6 @@ def _heuristic_vote(persona: str, feats: dict) -> Vote:
     if persona == "TapeReader":
         score = 4 * ret_5 + 0.6 * macd_d + 0.03 * (rsi - 50)
     elif persona == "Contrarian":
-        # fades extremes
         score = -3 * ret_5 - 0.05 * (rsi - 50) - 2 * (bbp - 0.5)
     elif persona == "MicroQuant":
         score = (
@@ -125,38 +121,14 @@ def _heuristic_vote(persona: str, feats: dict) -> Vote:
 
 # ───────────────────────── LLM-backed personas ─────────────────────────
 
-_client: AsyncOpenAI | None = None
+async def _ask_persona(persona: dict, snapshot: str, features: dict) -> Vote:
+    llm = get_llm()
+    if llm is None:
+        return _heuristic_vote(persona["name"], features)
 
-
-def _llm() -> AsyncOpenAI | None:
-    global _client
-    if not settings.OPENAI_API_KEY:
-        return None
-    if _client is None:
-        kwargs = {"api_key": settings.OPENAI_API_KEY}
-        if settings.OPENAI_BASE_URL:
-            kwargs["base_url"] = settings.OPENAI_BASE_URL
-        _client = AsyncOpenAI(**kwargs)
-    return _client
-
-
-async def _ask_persona(persona: dict, snapshot: str) -> Vote:
-    client = _llm()
-    if client is None:
-        return _heuristic_vote(persona["name"], json.loads(snapshot)["features"])
-
+    system = persona["system"] + "\n" + VOTE_SCHEMA_HINT
     try:
-        resp = await client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": persona["system"] + "\n" + VOTE_SCHEMA_HINT},
-                {"role": "user", "content": snapshot},
-            ],
-            temperature=0.4,
-            response_format={"type": "json_object"},
-            max_tokens=120,
-        )
-        data = json.loads(resp.choices[0].message.content)
+        data = await llm.chat_json(system, snapshot, max_tokens=120)
         return Vote(
             persona=persona["name"],
             vote=str(data.get("vote", "neutral")).lower(),
@@ -164,8 +136,8 @@ async def _ask_persona(persona: dict, snapshot: str) -> Vote:
             reason=str(data.get("reason", ""))[:120],
         )
     except Exception as e:
-        log.warning("persona %s failed: %s — falling back", persona["name"], e)
-        return _heuristic_vote(persona["name"], json.loads(snapshot)["features"])
+        log.warning("persona %s failed (%s) — using heuristic", persona["name"], e)
+        return _heuristic_vote(persona["name"], features)
 
 
 # ───────────────────────── orchestration ─────────────────────────
@@ -179,7 +151,7 @@ async def run_swarm(features: dict, btc_price: float, ml_p_up: float) -> tuple[f
         "horizon": "5 minutes",
     })
 
-    votes = await asyncio.gather(*[_ask_persona(p, snapshot) for p in PERSONAS])
+    votes = await asyncio.gather(*[_ask_persona(p, snapshot, features) for p in PERSONAS])
 
     # Bayesian-ish aggregation: start from ML prior, nudge by weighted votes.
     log_odds = _logit(ml_p_up)
@@ -196,10 +168,8 @@ async def run_swarm(features: dict, btc_price: float, ml_p_up: float) -> tuple[f
 
 def _logit(p: float) -> float:
     p = min(max(p, 1e-4), 1 - 1e-4)
-    import math
     return math.log(p / (1 - p))
 
 
 def _sigmoid(x: float) -> float:
-    import math
     return 1.0 / (1.0 + math.exp(-x))

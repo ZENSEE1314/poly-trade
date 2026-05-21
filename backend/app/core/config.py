@@ -18,6 +18,21 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+psycopg://oracle:oracle@localhost:5432/oracle"
     REDIS_URL: str = "redis://localhost:6379/0"
 
+    # ─── LLM provider ─────────────────────────────────────────────────
+    # "ollama" | "openai" | "none"
+    # "none" disables LLM calls entirely — swarm runs on deterministic heuristics.
+    LLM_PROVIDER: str = "ollama"
+
+    # Ollama (default). Works against a local Ollama server, Ollama Cloud,
+    # or any self-hosted Ollama instance. Communication uses Ollama's native
+    # /api/chat endpoint (no OpenAI compatibility layer required).
+    OLLAMA_HOST: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "glm-5.1:cloud"
+    OLLAMA_API_KEY: str = ""           # required for Ollama Cloud (:cloud tags)
+    OLLAMA_KEEP_ALIVE: str = "5m"      # how long ollama keeps the model loaded
+    OLLAMA_TIMEOUT: float = 30.0
+
+    # OpenAI (optional fallback / alternative)
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o-mini"
     OPENAI_BASE_URL: str = ""
