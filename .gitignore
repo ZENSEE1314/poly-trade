@@ -1,0 +1,29 @@
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+dist/
+.vite/
+*.log
+
+# Data / models
+/data/
+*.json.lock
+btc_5m_xgb.json
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

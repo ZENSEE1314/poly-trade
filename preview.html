@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>BTC Oracle — Preview</title>
+<style>
+  :root{--bg:#0b0f17;--panel:#0d131c;--border:#1d2735;--mute:#9aa6b2;--text:#e6edf3;
+        --blue:#388bfd;--green:#3fb950;--red:#ff6b6b;--purple:#d2a8ff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px Inter,system-ui,Segoe UI,sans-serif}
+  .app{display:grid;grid-template-columns:240px 1fr;min-height:100vh}
+  aside{background:var(--panel);padding:20px;border-right:1px solid var(--border)}
+  .logo{font-weight:700;font-size:18px;margin-bottom:22px}
+  nav a{display:block;padding:10px 14px;margin-bottom:4px;border-radius:8px;text-decoration:none;color:var(--mute);font-weight:500}
+  nav a.active{color:#fff;background:var(--border)}
+  main{padding:28px}
+  h2{margin-top:0} h3{margin-top:0}
+  .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+  .tile{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px}
+  .tile .lbl{color:var(--mute);font-size:12px}
+  .tile .v{margin-top:4px;font-size:22px;font-weight:600}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px;margin-top:18px}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th{color:var(--mute);text-align:left;font-weight:500;padding:8px 0}
+  td{padding:8px 0;border-top:1px solid var(--border)}
+  .pill{padding:2px 8px;border-radius:999px;font-size:12px}
+  .up{background:rgba(63,185,80,.13);color:var(--green)}
+  .down{background:rgba(255,107,107,.13);color:var(--red)}
+  .neutral{background:rgba(154,166,178,.13);color:var(--mute)}
+  .chart{height:220px;background:linear-gradient(180deg,transparent,rgba(56,139,253,.05));border-radius:8px;position:relative;overflow:hidden}
+  .chart svg{display:block;width:100%;height:100%}
+  .warn{background:#1b1410;border:1px solid #5d3818;color:#e6c98b;border-radius:8px;padding:14px;font-size:13px;margin-bottom:18px}
+  .small{font-size:11px;color:#6b7785;line-height:1.5;margin-top:30px}
+  .row{display:flex;gap:12px;align-items:center}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="logo">₿ BTC Oracle</div>
+    <nav>
+      <a class="active" href="#">Dashboard</a>
+      <a href="#">Wallet</a>
+      <a href="#">Risk &amp; Auto-Trade</a>
+      <a href="#">History</a>
+    </nav>
+    <div class="small">
+      Paper trading is on by default. Live trades require linking a wallet and
+      acknowledging risk. Not investment advice.
+    </div>
+  </aside>
+  <main>
+    <h2>Live Prediction</h2>
+    <div class="warn">
+      <b>Preview screenshot.</b> Data here is fake. Run <code>docker compose up</code>
+      from <code>infra/</code> to get real, live forecasts streaming from Binance + the LLM swarm.
+    </div>
+
+    <div class="grid4">
+      <div class="tile"><div class="lbl">BTC spot</div><div class="v">$68,412.55</div></div>
+      <div class="tile"><div class="lbl">Next window P(Up)</div><div class="v" style="color:var(--green)">62.4%</div></div>
+      <div class="tile"><div class="lbl">ML model</div><div class="v">58.9%</div></div>
+      <div class="tile"><div class="lbl">LLM swarm</div><div class="v">66.7%</div></div>
+    </div>
+
+    <div class="card">
+      <h3>Swarm Votes</h3>
+      <table>
+        <thead><tr><th>Persona</th><th>Vote</th><th>Confidence</th><th>Reason</th></tr></thead>
+        <tbody>
+          <tr><td>TapeReader</td><td><span class="pill up">up</span></td><td>74%</td><td style="color:var(--mute)">MACD bullish crossover, RSI 58</td></tr>
+          <tr><td>Contrarian</td><td><span class="pill down">down</span></td><td>41%</td><td style="color:var(--mute)">BBands %B near 0.8, fading</td></tr>
+          <tr><td>MicroQuant</td><td><span class="pill up">up</span></td><td>62%</td><td style="color:var(--mute)">Volume z+1.4, lower wick</td></tr>
+          <tr><td>MacroBias</td><td><span class="pill up">up</span></td><td>58%</td><td style="color:var(--mute)">60-min trend +0.4%</td></tr>
+          <tr><td>SentimentBot</td><td><span class="pill neutral">neutral</span></td><td>20%</td><td style="color:var(--mute)">no live feed</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3>P(Up) — last 60 windows</h3>
+      <div class="chart">
+        <svg viewBox="0 0 600 200" preserveAspectRatio="none">
+          <defs>
+            <linearGradient id="g" x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0" stop-color="#388bfd" stop-opacity=".35"/>
+              <stop offset="1" stop-color="#388bfd" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <!-- baseline 0.5 -->
+          <line x1="0" x2="600" y1="100" y2="100" stroke="#1d2735" stroke-dasharray="4 4"/>
+          <!-- p_up (blue) -->
+          <path d="M0,110 L20,108 40,102 60,95 80,92 100,98 120,85 140,78 160,82 180,76 200,72 220,80 240,70 260,66 280,72 300,60 320,55 340,62 360,50 380,46 400,52 420,40 440,38 460,44 480,52 500,48 520,42 540,50 560,55 580,48 600,42 L600,200 L0,200 Z" fill="url(#g)"/>
+          <polyline points="0,110 20,108 40,102 60,95 80,92 100,98 120,85 140,78 160,82 180,76 200,72 220,80 240,70 260,66 280,72 300,60 320,55 340,62 360,50 380,46 400,52 420,40 440,38 460,44 480,52 500,48 520,42 540,50 560,55 580,48 600,42"
+                    fill="none" stroke="#388bfd" stroke-width="2"/>
+          <!-- ml (green) -->
+          <polyline points="0,115 20,114 40,108 60,104 80,98 100,103 120,94 140,90 160,92 180,88 200,82 220,90 240,80 260,76 280,82 300,72 320,68 340,72 360,64 380,60 400,66 420,55 440,52 460,58 480,64 500,62 520,57 540,64 560,68 580,62 600,56"
+                    fill="none" stroke="#3fb950" stroke-width="1.5" opacity=".85"/>
+          <!-- swarm (purple) -->
+          <polyline points="0,108 20,104 40,98 60,90 80,88 100,94 120,80 140,72 160,76 180,68 200,66 220,72 240,64 260,58 280,66 300,52 320,46 340,55 360,42 380,40 400,46 420,34 440,30 460,38 480,44 500,40 520,32 540,42 560,46 580,40 600,32"
+                    fill="none" stroke="#d2a8ff" stroke-width="1.5" opacity=".75"/>
+        </svg>
+      </div>
+      <div class="row" style="margin-top:10px;font-size:12px;color:var(--mute);gap:18px">
+        <span style="color:#388bfd">━ p_up (blend)</span>
+        <span style="color:#3fb950">━ ML model</span>
+        <span style="color:#d2a8ff">━ Swarm</span>
+        <span>·· 0.50 baseline</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Your 7-day stats (paper)</h3>
+      <div class="grid4">
+        <div class="tile"><div class="lbl">Trades</div><div class="v">142</div></div>
+        <div class="tile"><div class="lbl">Resolved</div><div class="v">138</div></div>
+        <div class="tile"><div class="lbl">Win rate</div><div class="v">51.4%</div></div>
+        <div class="tile"><div class="lbl">PnL (USDC)</div><div class="v" style="color:var(--green)">+12.78</div></div>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>
