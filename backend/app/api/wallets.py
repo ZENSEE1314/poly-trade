@@ -113,12 +113,7 @@ async def connect_via_metamask(
     }
 
     async with httpx.AsyncClient(timeout=15.0) as client:
-        r = await client.post(
-            f"{CLOB_HOST}/auth/api-key",
-            headers=poly_headers,
-            # NOTE: some Polymarket endpoints gate on Content-Type even for header-only auth
-            json={},
-        )
+        r = await client.post(f"{CLOB_HOST}/auth/api-key", headers=poly_headers)
 
     if r.status_code != 200:
         raise HTTPException(400, detail=f"Polymarket rejected the signature: {r.text}")

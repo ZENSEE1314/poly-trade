@@ -40,12 +40,19 @@ export default function Wallet() {
       const nonce = 0;
       const message = `${timestamp}${nonce}`;
 
+      // personal_sign requires a 0x-prefixed hex string, NOT a raw UTF-8 string.
+      // Passing a plain string causes MetaMask to misinterpret the bytes, producing
+      // a signature that Polymarket's verifier rejects.
+      const msgHex = "0x" + Array.from(new TextEncoder().encode(message))
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join("");
+
       setMsg("Please approve the signature request in MetaMask…");
 
       // 3. Sign with MetaMask (personal_sign prepends the Ethereum message prefix)
       const signature = await window.ethereum.request({
         method: "personal_sign",
-        params: [message, address],
+        params: [msgHex, address],
       }) as string;
 
       setMsg("Linking wallet with Polymarket…");
