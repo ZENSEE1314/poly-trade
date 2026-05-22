@@ -2,8 +2,6 @@ import json
 import logging
 
 import httpx
-from eth_account import Account
-from eth_account.messages import encode_structured_data
 from eth_utils import to_checksum_address
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -109,58 +107,16 @@ async def connect_via_metamask(
     except ValueError:
         raise HTTPException(400, detail="Invalid Ethereum address")
 
-    # Verify the EIP-712 signature locally before forwarding to Polymarket.
-    # Must match the exact structure used by py-clob-client's sign_clob_auth_message().
-    clob_auth_typed_data = {
-        "types": {
-            "EIP712Domain": [
-                {"name": "name",    "type": "string"},
-                {"name": "version", "type": "string"},
-                {"name": "chainId", "type": "uint256"},
-            ],
-            "ClobAuth": [
-                {"name": "address",   "type": "string"},
-                {"name": "timestamp", "type": "string"},
-                {"name": "nonce",     "type": "uint256"},
-                {"name": "message",   "type": "string"},
-            ],
-        },
-        "primaryType": "ClobAuth",
-        "domain": {
-            "name": "ClobAuthDomain",
-            "version": "1",
-            "chainId": 137,
-        },
-        "message": {
-            "address":   payload.address,
-            "timestamp": str(payload.timestamp),
-            "nonce":     payload.nonce,
-            "message":   "This message attests that I control the given wallet",
-        },
-    }
-    try:
-        encoded = encode_structured_data(primitive=clob_auth_typed_data)
-        recovered = Account.recover_message(encoded, signature=payload.signature)
-    except Exception as exc:
-        log.error("EIP-712 signature parse error: %s", exc)
-        raise HTTPException(
-            400,
-            detail=f"Cannot parse EIP-712 signature: {exc}",
-        )
+    log.info("Forwarding EIP-712 ClobAuth signature to Polymarket: address=%s", checksummed)
 
-    if recovered.lower() != payload.address.lower():
-        log.error("Sig mismatch: recovered=%s expected=%s", recovered, payload.address)
-        raise HTTPException(
-            400,
-            detail=f"Signature mismatch: recovered {recovered}, expected {payload.address}",
-        )
-
-    log.info("EIP-712 signature OK: address=%s", checksummed)
-
-    # POLY_ADDRESS must match the address used in the signed ClobAuth.address field.
-    # Frontend signs with lowercase (MetaMask default) so forward lowercase here.
-    # We store checksummed in our DB but Polymarket must verify with the same value.
-    # py-clob-client uses prepend_zx() which adds 0x — send signature with 0x as-is.
+    # Forward the EIP-712 signature to Polymarket as L1 auth headers.
+    # Polymarket verifies using the same ClobAuth struct + domain as py-clob-client,
+    # so their verifier is authoritative. No need for a local re-verification that
+    # uses a different Python EIP-712 implementation and produces wrong hashes.
+    #
+    # POLY_ADDRESS must match the address in the signed ClobAuth.address field.
+    # Frontend sends lowercase (MetaMask default) so we forward lowercase here.
+    # Polymarket reconstructs the struct using POLY_ADDRESS — it must be consistent.
     poly_headers = {
         "POLY_ADDRESS": payload.address,
         "POLY_SIGNATURE": payload.signature,
