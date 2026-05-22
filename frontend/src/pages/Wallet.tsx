@@ -37,11 +37,8 @@ export default function Wallet() {
     setConnecting(true);
     setMsg(""); setIsError(false); setPolyRejected(false);
     try {
-      const accounts = await window.ethereum.request({ method: "eth_requestAccounts" }) as string[];
-      const address = accounts[0];
-
-      // Polymarket runs on Polygon (chainId 137). MetaMask enforces that the
-      // EIP-712 domain chainId matches the active network, so we must switch first.
+      // Step 1: Ensure we're on Polygon — MetaMask enforces that the EIP-712
+      // domain chainId matches the active network.
       const chainHex = await window.ethereum.request({ method: "eth_chainId" }) as string;
       if (parseInt(chainHex, 16) !== 137) {
         setSuccess("Switching MetaMask to Polygon (required for Polymarket)…");
@@ -52,7 +49,6 @@ export default function Wallet() {
           });
         } catch (switchErr: any) {
           if (switchErr.code === 4902) {
-            // Polygon not yet in MetaMask — add it first
             await window.ethereum.request({
               method: "wallet_addEthereumChain",
               params: [{
@@ -68,6 +64,12 @@ export default function Wallet() {
           }
         }
       }
+
+      // Step 2: Request accounts AFTER the network switch — MetaMask may have
+      // a different active account selected on Polygon than on Ethereum mainnet.
+      // Using pre-switch accounts[0] causes a signature mismatch.
+      const accounts = await window.ethereum.request({ method: "eth_requestAccounts" }) as string[];
+      const address = accounts[0];
 
       const timestamp = Math.floor(Date.now() / 1000);
       const nonce = 0;
