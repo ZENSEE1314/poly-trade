@@ -95,7 +95,7 @@ export default function Wallet() {
             { name: "chainId", type: "uint256" },
           ],
           ClobAuth: [
-            { name: "address",   type: "string"  },
+            { name: "address",   type: "address" },
             { name: "timestamp", type: "string"  },
             { name: "nonce",     type: "uint256" },
             { name: "message",   type: "string"  },
