@@ -1,9 +1,14 @@
 import json
+import logging
 
 import httpx
+from eth_account import Account
+from eth_account.messages import encode_defunct
 from eth_utils import to_checksum_address
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+
+log = logging.getLogger(__name__)
 
 from ..core.config import get_settings
 from ..core.kms import vault
@@ -105,6 +110,34 @@ async def connect_via_metamask(
     except ValueError:
         raise HTTPException(400, detail="Invalid Ethereum address")
 
+    # Verify the signature locally before forwarding to Polymarket.
+    # Polymarket signs: encode_defunct(text="{timestamp}{nonce}")
+    msg_text = f"{payload.timestamp}{payload.nonce}"
+    try:
+        encoded = encode_defunct(text=msg_text)
+        recovered = Account.recover_message(encoded, signature=payload.signature)
+    except Exception as exc:
+        log.error("Signature parse error: %s", exc)
+        raise HTTPException(
+            400,
+            detail=f"Cannot parse MetaMask signature — try reconnecting MetaMask: {exc}",
+        )
+
+    if recovered.lower() != payload.address.lower():
+        log.error(
+            "Signature mismatch: recovered=%s expected=%s msg=%r",
+            recovered, payload.address, msg_text,
+        )
+        raise HTTPException(
+            400,
+            detail=(
+                f"Signature mismatch: recovered {recovered} but expected {payload.address}. "
+                "The signing message format is incorrect."
+            ),
+        )
+
+    log.info("Signature verified OK: address=%s msg=%r", checksummed, msg_text)
+
     poly_headers = {
         "POLY_ADDRESS": checksummed,
         "POLY_SIGNATURE": payload.signature,
@@ -115,8 +148,20 @@ async def connect_via_metamask(
     async with httpx.AsyncClient(timeout=15.0) as client:
         r = await client.post(f"{CLOB_HOST}/auth/api-key", headers=poly_headers)
 
+    log.info("Polymarket /auth/api-key → %s: %s", r.status_code, r.text[:300])
+
     if r.status_code != 200:
-        raise HTTPException(400, detail=f"Polymarket rejected the signature: {r.text}")
+        # "Invalid L1 Request headers" from Polymarket usually means the wallet
+        # has never been registered on polymarket.com. The user must visit
+        # polymarket.com, connect their MetaMask wallet and accept ToS first.
+        raise HTTPException(
+            400,
+            detail=(
+                f"Polymarket rejected the request: {r.text}. "
+                "If your wallet has never been used on Polymarket before, please visit "
+                "polymarket.com, connect your MetaMask wallet there first, then retry."
+            ),
+        )
 
     data = r.json()
     # Polymarket returns {apiKey, secret, passphrase}
