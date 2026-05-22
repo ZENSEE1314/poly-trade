@@ -12,7 +12,7 @@ class Settings(BaseSettings):
 
     JWT_SECRET: str = "dev-secret-change-me"
     JWT_ALG: str = "HS256"
-    JWT_TTL_MIN: int = 60
+    JWT_TTL_MIN: int = 10080  # 7 days
     MASTER_KMS_KEY_B64: str = ""
 
     DATABASE_URL: str = "postgresql+psycopg://oracle:oracle@localhost:5432/oracle"

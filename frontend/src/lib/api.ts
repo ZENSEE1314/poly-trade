@@ -15,6 +15,12 @@ async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
   if (t) headers["Authorization"] = `Bearer ${t}`;
   const r = await fetch(`${BASE}${path}`, { ...opts, headers });
   if (!r.ok) {
+    // Token expired or revoked — wipe it and send user back to login.
+    if (r.status === 401) {
+      localStorage.removeItem("token");
+      window.location.href = "/";
+      return undefined as T;
+    }
     let msg = `HTTP ${r.status}`;
     try { const j = await r.json(); msg = j.detail || msg; } catch {}
     throw new Error(msg);
