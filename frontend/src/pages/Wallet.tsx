@@ -39,6 +39,36 @@ export default function Wallet() {
     try {
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" }) as string[];
       const address = accounts[0];
+
+      // Polymarket runs on Polygon (chainId 137). MetaMask enforces that the
+      // EIP-712 domain chainId matches the active network, so we must switch first.
+      const chainHex = await window.ethereum.request({ method: "eth_chainId" }) as string;
+      if (parseInt(chainHex, 16) !== 137) {
+        setSuccess("Switching MetaMask to Polygon (required for Polymarket)…");
+        try {
+          await window.ethereum.request({
+            method: "wallet_switchEthereumChain",
+            params: [{ chainId: "0x89" }],
+          });
+        } catch (switchErr: any) {
+          if (switchErr.code === 4902) {
+            // Polygon not yet in MetaMask — add it first
+            await window.ethereum.request({
+              method: "wallet_addEthereumChain",
+              params: [{
+                chainId: "0x89",
+                chainName: "Polygon Mainnet",
+                nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
+                rpcUrls: ["https://polygon-rpc.com/"],
+                blockExplorerUrls: ["https://polygonscan.com/"],
+              }],
+            });
+          } else {
+            throw switchErr;
+          }
+        }
+      }
+
       const timestamp = Math.floor(Date.now() / 1000);
       const nonce = 0;
 
