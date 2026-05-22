@@ -118,7 +118,7 @@ async def connect_via_metamask(
     # Frontend sends lowercase (MetaMask default) so we forward lowercase here.
     # Polymarket reconstructs the struct using POLY_ADDRESS — it must be consistent.
     poly_headers = {
-        "POLY_ADDRESS": payload.address,
+        "POLY_ADDRESS": checksummed,
         "POLY_SIGNATURE": payload.signature,
         "POLY_TIMESTAMP": str(payload.timestamp),
         "POLY_NONCE": str(payload.nonce),

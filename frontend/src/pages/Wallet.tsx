@@ -1,4 +1,5 @@
 import { useEffect, useState, type CSSProperties } from "react";
+import { getAddress } from "ethers";
 import { api } from "../lib/api";
 
 declare global {
@@ -69,7 +70,10 @@ export default function Wallet() {
       // a different active account selected on Polygon than on Ethereum mainnet.
       // Using pre-switch accounts[0] causes a signature mismatch.
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" }) as string[];
-      const address = accounts[0];
+      // MetaMask returns lowercase addresses; EIP-55 checksum is required so that
+      // Polymarket's verifier (which checksums POLY_ADDRESS before comparing to the
+      // recovered signer) sees a consistent value in both the signed struct and the header.
+      const address = getAddress(accounts[0]);
 
       const timestamp = Math.floor(Date.now() / 1000);
       const nonce = 0;
