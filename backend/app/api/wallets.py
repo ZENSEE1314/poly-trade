@@ -138,9 +138,16 @@ async def connect_via_metamask(
 
     log.info("Signature verified OK: address=%s msg=%r", checksummed, msg_text)
 
+    # py-clob-client sends signatures WITHOUT the 0x prefix (Python HexBytes.hex()
+    # returns plain hex). MetaMask returns WITH 0x. Polymarket's backend likely uses
+    # bytes.fromhex() which raises ValueError on 0x-prefixed input — strip it.
+    signature = payload.signature
+    if signature.startswith(("0x", "0X")):
+        signature = signature[2:]
+
     poly_headers = {
         "POLY_ADDRESS": checksummed,
-        "POLY_SIGNATURE": payload.signature,
+        "POLY_SIGNATURE": signature,
         "POLY_TIMESTAMP": str(payload.timestamp),
         "POLY_NONCE": str(payload.nonce),
     }
