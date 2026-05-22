@@ -3,7 +3,7 @@ import logging
 
 import httpx
 from eth_account import Account
-from eth_account.messages import encode_defunct
+from eth_account.messages import encode_structured_data
 from eth_utils import to_checksum_address
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -97,57 +97,73 @@ async def connect_via_metamask(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """One-click MetaMask wallet link.
+    """One-click MetaMask wallet link via EIP-712 structured data signing.
 
-    The frontend asks MetaMask to sign "{timestamp}{nonce}" via personal_sign,
-    then POSTs the result here. We forward it as Polymarket L1 auth headers to
-    POST /auth/api-key, which returns L2 API credentials (key/secret/passphrase)
-    without us ever seeing the user's private key.
+    The frontend calls eth_signTypedData_v4 with ClobAuth struct (Polymarket's
+    EIP-712 domain). We forward the signature as Polymarket L1 auth headers to
+    POST /auth/api-key, which returns L2 API credentials without us ever seeing
+    the user's private key.
     """
-    # MetaMask returns lowercase addresses; Polymarket requires EIP-55 checksum format.
     try:
         checksummed = to_checksum_address(payload.address)
     except ValueError:
         raise HTTPException(400, detail="Invalid Ethereum address")
 
-    # Verify the signature locally before forwarding to Polymarket.
-    # Polymarket signs: encode_defunct(text="{timestamp}{nonce}")
-    msg_text = f"{payload.timestamp}{payload.nonce}"
+    # Verify the EIP-712 signature locally before forwarding to Polymarket.
+    # Must match the exact structure used by py-clob-client's sign_clob_auth_message().
+    clob_auth_typed_data = {
+        "types": {
+            "EIP712Domain": [
+                {"name": "name",    "type": "string"},
+                {"name": "version", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+            ],
+            "ClobAuth": [
+                {"name": "address",   "type": "string"},
+                {"name": "timestamp", "type": "string"},
+                {"name": "nonce",     "type": "uint256"},
+                {"name": "message",   "type": "string"},
+            ],
+        },
+        "primaryType": "ClobAuth",
+        "domain": {
+            "name": "ClobAuthDomain",
+            "version": "1",
+            "chainId": 137,
+        },
+        "message": {
+            "address":   payload.address,
+            "timestamp": str(payload.timestamp),
+            "nonce":     payload.nonce,
+            "message":   "This message attests that I control the given wallet",
+        },
+    }
     try:
-        encoded = encode_defunct(text=msg_text)
+        encoded = encode_structured_data(primitive=clob_auth_typed_data)
         recovered = Account.recover_message(encoded, signature=payload.signature)
     except Exception as exc:
-        log.error("Signature parse error: %s", exc)
+        log.error("EIP-712 signature parse error: %s", exc)
         raise HTTPException(
             400,
-            detail=f"Cannot parse MetaMask signature — try reconnecting MetaMask: {exc}",
+            detail=f"Cannot parse EIP-712 signature: {exc}",
         )
 
     if recovered.lower() != payload.address.lower():
-        log.error(
-            "Signature mismatch: recovered=%s expected=%s msg=%r",
-            recovered, payload.address, msg_text,
-        )
+        log.error("Sig mismatch: recovered=%s expected=%s", recovered, payload.address)
         raise HTTPException(
             400,
-            detail=(
-                f"Signature mismatch: recovered {recovered} but expected {payload.address}. "
-                "The signing message format is incorrect."
-            ),
+            detail=f"Signature mismatch: recovered {recovered}, expected {payload.address}",
         )
 
-    log.info("Signature verified OK: address=%s msg=%r", checksummed, msg_text)
+    log.info("EIP-712 signature OK: address=%s", checksummed)
 
-    # py-clob-client sends signatures WITHOUT the 0x prefix (Python HexBytes.hex()
-    # returns plain hex). MetaMask returns WITH 0x. Polymarket's backend likely uses
-    # bytes.fromhex() which raises ValueError on 0x-prefixed input — strip it.
-    signature = payload.signature
-    if signature.startswith(("0x", "0X")):
-        signature = signature[2:]
-
+    # POLY_ADDRESS must match the address used in the signed ClobAuth.address field.
+    # Frontend signs with lowercase (MetaMask default) so forward lowercase here.
+    # We store checksummed in our DB but Polymarket must verify with the same value.
+    # py-clob-client uses prepend_zx() which adds 0x — send signature with 0x as-is.
     poly_headers = {
-        "POLY_ADDRESS": checksummed,
-        "POLY_SIGNATURE": signature,
+        "POLY_ADDRESS": payload.address,
+        "POLY_SIGNATURE": payload.signature,
         "POLY_TIMESTAMP": str(payload.timestamp),
         "POLY_NONCE": str(payload.nonce),
     }

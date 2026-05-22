@@ -41,18 +41,44 @@ export default function Wallet() {
       const address = accounts[0];
       const timestamp = Math.floor(Date.now() / 1000);
       const nonce = 0;
-      const message = `${timestamp}${nonce}`;
 
-      // personal_sign requires a 0x-prefixed hex string
-      const msgHex = "0x" + Array.from(new TextEncoder().encode(message))
-        .map(b => b.toString(16).padStart(2, "0"))
-        .join("");
+      // Polymarket uses EIP-712 structured data signing, NOT personal_sign.
+      // Struct: ClobAuth { address, timestamp (string), nonce (uint256), message }
+      // Domain: ClobAuthDomain / version 1 / chainId 137 (Polygon)
+      // This matches py-clob-client's sign_clob_auth_message() exactly.
+      const typedData = {
+        domain: {
+          name: "ClobAuthDomain",
+          version: "1",
+          chainId: 137,
+        },
+        types: {
+          EIP712Domain: [
+            { name: "name",    type: "string"  },
+            { name: "version", type: "string"  },
+            { name: "chainId", type: "uint256" },
+          ],
+          ClobAuth: [
+            { name: "address",   type: "string"  },
+            { name: "timestamp", type: "string"  },
+            { name: "nonce",     type: "uint256" },
+            { name: "message",   type: "string"  },
+          ],
+        },
+        primaryType: "ClobAuth",
+        message: {
+          address:   address,
+          timestamp: String(timestamp),
+          nonce:     nonce,
+          message:   "This message attests that I control the given wallet",
+        },
+      };
 
       setSuccess("Please approve the signature request in MetaMask…");
 
       const signature = await window.ethereum.request({
-        method: "personal_sign",
-        params: [msgHex, address],
+        method: "eth_signTypedData_v4",
+        params: [address, JSON.stringify(typedData)],
       }) as string;
 
       setSuccess("Linking wallet with Polymarket…");
