@@ -1,7 +1,6 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { api } from "../lib/api";
 
-// MetaMask injects window.ethereum — not typed in standard lib
 declare global {
   interface Window {
     ethereum?: {
@@ -10,63 +9,63 @@ declare global {
   }
 }
 
+const POLY_URL = "https://polymarket.com";
+
 export default function Wallet() {
   const [wallet, setWallet] = useState<any | null>(null);
   const [form, setForm] = useState({ address: "", funder: "", api_key: "", api_secret: "", api_passphrase: "" });
   const [msg, setMsg] = useState("");
+  const [isError, setIsError] = useState(false);
+  const [polyRejected, setPolyRejected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [showManual, setShowManual] = useState(false);
 
   async function refresh() {
     try { setWallet(await api.me.wallet()); }
-    catch (e: any) { setMsg("Error: " + e.message); }
+    catch (e: any) { /* swallow — null wallet is fine */ }
   }
   useEffect(() => { refresh(); }, []);
 
+  function setSuccess(m: string) { setMsg(m); setIsError(false); setPolyRejected(false); }
+  function setErr(m: string, poly = false) { setMsg(m); setIsError(true); setPolyRejected(poly); }
+
   async function connectMetaMask() {
     if (!window.ethereum) {
-      setMsg("MetaMask not found. Please install the MetaMask browser extension first.");
+      setErr("MetaMask not found. Please install the MetaMask browser extension.");
       return;
     }
     setConnecting(true);
-    setMsg("");
+    setMsg(""); setIsError(false); setPolyRejected(false);
     try {
-      // 1. Get wallet address
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" }) as string[];
       const address = accounts[0];
-
-      // 2. Build the Polymarket L1 auth message: "{timestamp}{nonce}"
       const timestamp = Math.floor(Date.now() / 1000);
       const nonce = 0;
       const message = `${timestamp}${nonce}`;
 
-      // personal_sign requires a 0x-prefixed hex string, NOT a raw UTF-8 string.
-      // Passing a plain string causes MetaMask to misinterpret the bytes, producing
-      // a signature that Polymarket's verifier rejects.
+      // personal_sign requires a 0x-prefixed hex string
       const msgHex = "0x" + Array.from(new TextEncoder().encode(message))
         .map(b => b.toString(16).padStart(2, "0"))
         .join("");
 
-      setMsg("Please approve the signature request in MetaMask…");
+      setSuccess("Please approve the signature request in MetaMask…");
 
-      // 3. Sign with MetaMask (personal_sign prepends the Ethereum message prefix)
       const signature = await window.ethereum.request({
         method: "personal_sign",
         params: [msgHex, address],
       }) as string;
 
-      setMsg("Linking wallet with Polymarket…");
-
-      // 4. Backend exchanges the L1 signature for Polymarket L2 API credentials
+      setSuccess("Linking wallet with Polymarket…");
       await api.connectMetaMask({ address, signature, timestamp, nonce });
-      setMsg("Wallet linked ✓");
+      setSuccess("Wallet linked ✓");
       refresh();
     } catch (e: any) {
-      // MetaMask user rejection code is 4001
       if (e?.code === 4001) {
-        setMsg("Signature rejected — please approve the MetaMask request to link your wallet.");
+        setErr("You cancelled the MetaMask signature. Approve it to link your wallet.");
+      } else if (e?.message?.includes("Polymarket rejected")) {
+        setErr(e.message, true);
       } else {
-        setMsg("Error: " + (e?.message ?? String(e)));
+        setErr("Error: " + (e?.message ?? String(e)));
       }
     } finally {
       setConnecting(false);
@@ -74,12 +73,12 @@ export default function Wallet() {
   }
 
   async function linkManual() {
-    setMsg("");
+    setMsg(""); setIsError(false); setPolyRejected(false);
     try {
       await api.linkApiKey(form);
-      setMsg("Wallet linked ✓");
+      setSuccess("Wallet linked ✓");
       refresh();
-    } catch (e: any) { setMsg("Error: " + e.message); }
+    } catch (e: any) { setErr("Error: " + e.message); }
   }
 
   async function unlink() {
@@ -90,7 +89,7 @@ export default function Wallet() {
   }
 
   return (
-    <div>
+    <div style={{ maxWidth: 580 }}>
       <h2 style={{ marginTop: 0 }}>Polymarket Wallet</h2>
 
       {wallet ? (
@@ -108,71 +107,121 @@ export default function Wallet() {
           <button onClick={unlink} style={btnDanger}>Unlink wallet</button>
         </div>
       ) : (
-        <div style={{ maxWidth: 560 }}>
-          {/* ── Primary: One-click MetaMask ── */}
-          <div style={card}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-              <span style={{ fontSize: 28 }}>🦊</span>
-              <div>
-                <div style={{ fontWeight: 600 }}>Connect with MetaMask</div>
-                <div style={{ fontSize: 12, color: "#9aa6b2" }}>
-                  One click — no copy-pasting keys. MetaMask signs a message and we
-                  create your Polymarket API credentials automatically.
+        <>
+          {/* ── STEP 1: Get a Polymarket account ── */}
+          <div style={{ ...card, marginBottom: 12 }}>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+              <div style={stepBadge}>1</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>Get a Polymarket account</div>
+                <div style={{ fontSize: 12, color: "#9aa6b2", lineHeight: 1.6 }}>
+                  Polymarket requires your wallet to be registered before it will issue API credentials.
+                  This is a one-time step — visit polymarket.com, connect your MetaMask, and accept their Terms of Service.
+                </div>
+                <a
+                  href={POLY_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={btnPolymarket}
+                >
+                  Open Polymarket.com ↗
+                </a>
+                <div style={{ fontSize: 11, color: "#4a5568", marginTop: 8 }}>
+                  Already have an account? Skip to step 2.
                 </div>
               </div>
             </div>
-            {msg && (
-              <div style={{
-                marginTop: 10, fontSize: 13, padding: "8px 12px", borderRadius: 6,
-                background: msg.includes("✓") ? "#0d2b1a" : "#1a1018",
-                border: `1px solid ${msg.includes("✓") ? "#2d6a3f" : "#5d2a2a"}`,
-                color: msg.includes("✓") ? "#4caf6e" : "#ff9090",
-              }}>
-                {msg}
-              </div>
-            )}
-            <button onClick={connectMetaMask} disabled={connecting} style={btnMetaMask}>
-              {connecting ? "Connecting…" : "🦊 Connect MetaMask"}
-            </button>
           </div>
 
-          {/* ── Divider ── */}
-          <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "14px 0", color: "#4a5568", fontSize: 12 }}>
-            <div style={{ flex: 1, height: 1, background: "#1d2735" }} />
-            or enter API keys manually
-            <div style={{ flex: 1, height: 1, background: "#1d2735" }} />
-          </div>
-
-          {/* ── Secondary: Manual API key entry ── */}
+          {/* ── STEP 2: Connect ── */}
           <div style={card}>
-            <button
-              onClick={() => setShowManual(v => !v)}
-              style={{ background: "none", border: "none", color: "#9aa6b2", cursor: "pointer",
-                       fontSize: 13, padding: 0, textAlign: "left" }}>
-              {showManual ? "▾" : "▸"} Paste Polymarket L2 API keys manually
-            </button>
-
-            {showManual && (
-              <>
-                <div style={{ marginTop: 10, fontSize: 12, color: "#9aa6b2", lineHeight: 1.5 }}>
-                  ⚠️ These keys can place orders but <b>cannot move funds</b>. Never paste your private key here.
-                  Get them from <b>polymarket.com → Profile → Settings → API</b>.
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 14 }}>
+              <div style={stepBadge}>2</div>
+              <div>
+                <div style={{ fontWeight: 600 }}>Connect your wallet</div>
+                <div style={{ fontSize: 12, color: "#9aa6b2" }}>
+                  Choose one of the methods below.
                 </div>
-                <Field label="Wallet address (your Polymarket EOA)" value={form.address}
-                       set={v => setForm({ ...form, address: v })} />
-                <Field label="Funder address (optional — proxy wallets only)" value={form.funder}
-                       set={v => setForm({ ...form, funder: v })} />
-                <Field label="API Key" value={form.api_key}
-                       set={v => setForm({ ...form, api_key: v })} />
-                <Field label="API Secret" value={form.api_secret} type="password"
-                       set={v => setForm({ ...form, api_secret: v })} />
-                <Field label="API Passphrase" value={form.api_passphrase} type="password"
-                       set={v => setForm({ ...form, api_passphrase: v })} />
-                <button onClick={linkManual} style={btnPrimary}>Link wallet</button>
-              </>
-            )}
+              </div>
+            </div>
+
+            {/* MetaMask one-click */}
+            <div style={{ borderBottom: "1px solid #1d2735", paddingBottom: 16, marginBottom: 16 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <span style={{ fontSize: 20 }}>🦊</span>
+                <span style={{ fontWeight: 600, fontSize: 14 }}>One-click via MetaMask</span>
+                <span style={badge}>Recommended</span>
+              </div>
+              <div style={{ fontSize: 12, color: "#9aa6b2", marginBottom: 10 }}>
+                MetaMask signs a message — no copy-pasting. Works after step 1 is done.
+              </div>
+
+              {msg && (
+                <div style={{
+                  marginBottom: 10, fontSize: 12, padding: "10px 12px", borderRadius: 6,
+                  background: !isError ? "#0d2b1a" : "#1a1018",
+                  border: `1px solid ${!isError ? "#2d6a3f" : "#5d2a2a"}`,
+                  color: !isError ? "#4caf6e" : "#ff9090",
+                  lineHeight: 1.5,
+                }}>
+                  {msg}
+                  {polyRejected && (
+                    <div style={{ marginTop: 8 }}>
+                      <a
+                        href={POLY_URL}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ color: "#f6851b", fontWeight: 600, textDecoration: "none" }}
+                      >
+                        → Go to Polymarket.com to register your wallet ↗
+                      </a>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <button onClick={connectMetaMask} disabled={connecting} style={btnMetaMask}>
+                {connecting ? "Connecting…" : "🦊 Connect MetaMask"}
+              </button>
+            </div>
+
+            {/* Manual key entry */}
+            <div>
+              <button
+                onClick={() => setShowManual(v => !v)}
+                style={{ background: "none", border: "none", color: "#9aa6b2", cursor: "pointer",
+                         fontSize: 13, padding: 0, textAlign: "left", display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: 18 }}>🔑</span>
+                {showManual ? "▾" : "▸"} Paste API keys from polymarket.com
+              </button>
+
+              {showManual && (
+                <>
+                  <div style={{ marginTop: 10, fontSize: 12, color: "#9aa6b2", lineHeight: 1.6,
+                                background: "#0b0f17", borderRadius: 6, padding: "10px 12px",
+                                border: "1px solid #1d2735" }}>
+                    <b>How to get your keys:</b><br />
+                    polymarket.com → click your profile photo → <b>Settings</b> → <b>API Keys</b> → <b>Create key</b><br />
+                    Copy the <b>Key</b>, <b>Secret</b>, and <b>Passphrase</b> shown — you won't see them again.<br />
+                    <br />
+                    ⚠️ These keys can only trade — they <b>cannot withdraw funds</b>.
+                  </div>
+                  <Field label="Wallet address (0x…)" value={form.address}
+                         set={v => setForm({ ...form, address: v })} />
+                  <Field label="Funder address (only for proxy wallets — leave blank if unsure)" value={form.funder}
+                         set={v => setForm({ ...form, funder: v })} />
+                  <Field label="API Key" value={form.api_key}
+                         set={v => setForm({ ...form, api_key: v })} />
+                  <Field label="API Secret" value={form.api_secret} type="password"
+                         set={v => setForm({ ...form, api_secret: v })} />
+                  <Field label="API Passphrase" value={form.api_passphrase} type="password"
+                         set={v => setForm({ ...form, api_passphrase: v })} />
+                  <button onClick={linkManual} style={btnPrimary}>Link wallet</button>
+                </>
+              )}
+            </div>
           </div>
-        </div>
+        </>
       )}
     </div>
   );
@@ -195,8 +244,23 @@ function Field({ label, value, set, type = "text" }: {
 const card: CSSProperties = {
   background: "#0d131c", border: "1px solid #1d2735", borderRadius: 12, padding: 18,
 };
+const stepBadge: CSSProperties = {
+  width: 24, height: 24, borderRadius: "50%", background: "#1d2735",
+  color: "#9aa6b2", display: "flex", alignItems: "center", justifyContent: "center",
+  fontSize: 12, fontWeight: 700, flexShrink: 0, marginTop: 2,
+};
+const badge: CSSProperties = {
+  fontSize: 10, fontWeight: 600, padding: "2px 6px", borderRadius: 4,
+  background: "#0d2b1a", color: "#4caf6e", border: "1px solid #2d6a3f",
+};
+const btnPolymarket: CSSProperties = {
+  display: "inline-block", marginTop: 10, padding: "8px 14px",
+  background: "linear-gradient(135deg, #7b3fe4, #5b2ab5)",
+  color: "#fff", borderRadius: 8, textDecoration: "none",
+  fontSize: 13, fontWeight: 600,
+};
 const btnMetaMask: CSSProperties = {
-  marginTop: 14, width: "100%", padding: "12px 18px",
+  width: "100%", padding: "12px 18px",
   background: "linear-gradient(135deg, #f6851b, #e2761b)",
   color: "#fff", border: 0, borderRadius: 8, cursor: "pointer",
   fontSize: 15, fontWeight: 600, letterSpacing: "0.3px",
