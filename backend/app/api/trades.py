@@ -662,17 +662,7 @@ async def demo_tick(
         sim_price = _sim_ask(p_up, side)
         tokens = round(stake / sim_price, 6)
 
-        # Resolve immediately using simulated outcome — no reconciler dependency.
-        # Win probability = p_up for "up" trades, (1-p_up) for "down" trades.
-        win_prob = p_up if side == "up" else (1 - p_up)
-        won = random.random() < win_prob
-        if won:
-            pnl = round(tokens * (1 - POLY_FEE) - stake, 4)
-            status = "won"
-        else:
-            pnl = round(-stake, 4)
-            status = "lost"
-
+        # status=filled — reconciler sets real won/lost after window closes
         trade = Trade(
             user_id=user.id,
             window_ts=ws,
@@ -682,15 +672,13 @@ async def demo_tick(
             avg_price=sim_price,
             tokens_filled=tokens,
             is_paper=True,
-            status=status,
-            pnl_usdc=pnl,
+            status="filled",
+            pnl_usdc=0.0,
             order_meta={"demo": True, "p_up": round(p_up, 4)},
-            resolved_at=now,
         )
         db.add(trade)
         placed.append({
-            "user_id": user.id, "side": side, "stake": stake,
-            "price": sim_price, "won": won, "pnl": pnl,
+            "user_id": user.id, "side": side, "stake": stake, "price": sim_price,
         })
 
     # Also fix any orphaned "filled" demo trades from previous deploys
@@ -718,13 +706,11 @@ async def demo_tick(
 
     db.commit()
 
-    total_pnl = round(sum(t["pnl"] for t in placed), 2)
     return {
         "window_ts": ws,
         "side": side,
         "p_up": round(p_up, 4),
         "placed": len(placed),
         "orphans_fixed": fixed,
-        "total_pnl": total_pnl,
         "trades": placed,
     }

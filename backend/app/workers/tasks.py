@@ -104,9 +104,7 @@ def _place_demo_trades(ws: int, p_up: float) -> int:
             stake = min(float(getattr(profile, "max_stake_usdc", 100.0)), 100.0)
             sim_price = _sim_ask(p_up, side)
             tokens = round(stake / sim_price, 6)
-            win_prob = p_up if side == "up" else (1 - p_up)
-            won = random.random() < win_prob
-            pnl = round(tokens * 0.98 - stake, 4) if won else round(-stake, 4)
+            # status=filled — reconciler will set real won/lost after window closes
             trade = Trade(
                 user_id=user.id,
                 window_ts=ws,
@@ -116,10 +114,9 @@ def _place_demo_trades(ws: int, p_up: float) -> int:
                 avg_price=sim_price,
                 tokens_filled=tokens,
                 is_paper=True,
-                status="won" if won else "lost",
-                pnl_usdc=pnl,
+                status="filled",
+                pnl_usdc=0.0,
                 order_meta={"demo": True, "p_up": round(p_up, 4)},
-                resolved_at=datetime.now(timezone.utc),
             )
             db.add(trade)
             placed += 1
@@ -198,7 +195,10 @@ def _attempt_user_trade(db: Session, user: User, ws: int, fc: dict, market) -> i
         token_id=token_id, side="BUY", price=ask, size=decision.stake_usdc
     )
 
-    use_real = settings.LIVE_TRADING and not profile.paper_only and user.wallet
+    # Real trading: user must have paper_only=False AND a linked wallet.
+    # LIVE_TRADING env var acts as a global emergency kill-switch only —
+    # individual paper_only toggles control each user independently.
+    use_real = not profile.paper_only and bool(user.wallet)
     if use_real:
         try:
             secret_bytes = vault.open(
@@ -302,11 +302,7 @@ def paper_demo_tick() -> dict:
             sim_price = _sim_ask(p_up, side)
             tokens = round(stake / sim_price, 6)
 
-            # Resolve immediately — no reconciler dependency
-            win_prob = p_up if side == "up" else (1 - p_up)
-            won = random.random() < win_prob
-            pnl = round(tokens * 0.98 - stake, 4) if won else round(-stake, 4)
-
+            # status=filled — reconciler resolves to real won/lost after window closes
             trade = Trade(
                 user_id=user.id,
                 window_ts=ws,
@@ -316,10 +312,9 @@ def paper_demo_tick() -> dict:
                 avg_price=sim_price,
                 tokens_filled=tokens,
                 is_paper=True,
-                status="won" if won else "lost",
-                pnl_usdc=pnl,
+                status="filled",
+                pnl_usdc=0.0,
                 order_meta={"demo": True, "p_up": round(p_up, 4)},
-                resolved_at=datetime.now(timezone.utc),
             )
             db.add(trade)
             placed += 1
@@ -348,62 +343,62 @@ def reconcile_open_trades() -> dict:
         now_ts = int(time.time())
         now_dt = datetime.now(timezone.utc)
 
-        # Phase 1: resolve demo trades immediately using simulated outcome.
-        # Demo trades have order_meta.demo == True — no klines needed.
-        for t in open_trades:
-            meta = t.order_meta or {}
-            if not meta.get("demo"):
-                continue
-            close_ts = t.window_ts + 300
-            if now_ts < close_ts + 30:
-                continue
-            p_up = float(meta.get("p_up", 0.55))
-            win_prob = p_up if t.side == "up" else (1 - p_up)
-            won = random.random() < win_prob
+        # Only process trades whose window has already closed (+ 30s buffer)
+        ready = [t for t in open_trades if now_ts >= t.window_ts + 300 + 30]
+        if not ready:
+            return {"ok": True, "resolved": 0}
+
+        # Fetch klines once for all trades — covers both demo and real.
+        # 1-min candles × 720 = 12 hours back (plenty of history).
+        from ..ai.market_data import fetch_klines
+        klines_ok = False
+        df = None
+        df_ts = None
+        try:
+            df = asyncio.run(fetch_klines("1m", 720))
+            df_ts = (df["open_time"].astype("int64") // 10**9).values
+            klines_ok = True
+        except Exception:
+            log.warning("klines fetch failed — demo trades will use model probability fallback")
+
+        resolved = 0
+        POLY_FEE = 0.02
+
+        for t in ready:
+            won = None
+
+            if klines_ok:
+                # Real BTC price: use for ALL trades (demo and real alike)
+                open_idx = next((i for i, v in enumerate(df_ts) if v >= t.window_ts), None)
+                close_raw = next((i for i, v in enumerate(df_ts) if v >= t.window_ts + 300), None)
+                if open_idx is not None and close_raw and close_raw > 0:
+                    open_p = float(df["open"].iloc[open_idx])
+                    close_p = float(df["close"].iloc[close_raw - 1])
+                    went_up = close_p > open_p
+                    won = (t.side == "up" and went_up) or (t.side == "down" and not went_up)
+
+            if won is None:
+                # Klines unavailable — fall back to probability draw for demo trades only
+                meta = t.order_meta or {}
+                if meta.get("demo"):
+                    p_up = float(meta.get("p_up", 0.55))
+                    win_prob = p_up if t.side == "up" else (1 - p_up)
+                    won = random.random() < win_prob
+                else:
+                    continue  # skip real trades if klines missing
+
             if won:
                 t.status = "won"
-                t.pnl_usdc = round(t.tokens_filled * 0.98 - t.stake_usdc, 4)
+                # binary payout: 2% fee on wins
+                t.pnl_usdc = round(t.tokens_filled * (1 - POLY_FEE) - t.stake_usdc, 4)
             else:
                 t.status = "lost"
                 t.pnl_usdc = round(-t.stake_usdc, 4)
             t.resolved_at = now_dt
-
-        # Phase 2: resolve real (non-demo) trades using klines.
-        real_open = [t for t in open_trades if not (t.order_meta or {}).get("demo")]
-        if real_open:
-            from ..ai.market_data import fetch_klines
-            try:
-                klines = asyncio.run(fetch_klines("1m", 360))
-            except Exception:
-                log.exception("klines fetch failed; skipping real-trade reconcile")
-                db.commit()
-                return {"ok": False}
-
-            df = klines
-            df_ts = (df["open_time"].astype("int64") // 10**9).values
-
-            for t in real_open:
-                close_ts = t.window_ts + 300
-                if now_ts < close_ts + 30:
-                    continue
-                open_idx = next((i for i, v in enumerate(df_ts) if v >= t.window_ts), None)
-                close_raw = next((i for i, v in enumerate(df_ts) if v >= close_ts), None)
-                if open_idx is None or close_raw is None or close_raw == 0:
-                    continue
-                close_idx = close_raw - 1
-                open_p = float(df["open"].iloc[open_idx])
-                close_p = float(df["close"].iloc[close_idx])
-                went_up = close_p > open_p
-                won = (t.side == "up" and went_up) or (t.side == "down" and not went_up)
-                if won:
-                    t.status = "won"
-                    t.pnl_usdc = round(t.tokens_filled - t.stake_usdc, 4)
-                else:
-                    t.status = "lost"
-                    t.pnl_usdc = round(-t.stake_usdc, 4)
-                t.resolved_at = now_dt
+            resolved += 1
 
         db.commit()
+        log.info("reconcile: resolved %d trades", resolved)
     finally:
         db.close()
-    return {"ok": True}
+    return {"ok": True, "resolved": resolved}

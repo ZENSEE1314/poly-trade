@@ -65,7 +65,11 @@ export default function History() {
                 <td style={td}>{t.is_paper ? "Paper" : "Live"}</td>
                 <td style={td}><Stat s={t.status} /></td>
                 <td style={{ ...td, color: t.pnl_usdc > 0 ? "#3fb950" : t.pnl_usdc < 0 ? "#ff6b6b" : "#9aa6b2" }}>
-                  {t.pnl_usdc != null ? (t.pnl_usdc >= 0 ? "+" : "") + t.pnl_usdc.toFixed(2) : "—"}
+                  {t.status === "filled" || t.status === "submitted"
+                    ? <span style={{ color: "#555", fontSize: 12 }}>resolving…</span>
+                    : t.pnl_usdc != null
+                      ? (t.pnl_usdc >= 0 ? "+" : "") + t.pnl_usdc.toFixed(2)
+                      : "—"}
                 </td>
               </tr>
             ))}
@@ -83,12 +87,13 @@ const th: React.CSSProperties = { padding: "10px 14px", fontWeight: 500 };
 const td: React.CSSProperties = { padding: "10px 14px" };
 
 function Stat({ s }: { s: string }) {
-  const colors: Record<string, string> = {
-    won: "#3fb950",
-    lost: "#ff6b6b",
-    filled: "#79c0ff",
-    error: "#ff6b6b",
-    submitted: "#9aa6b2",
+  const map: Record<string, { label: string; color: string }> = {
+    won:       { label: "WON ✓",    color: "#3fb950" },
+    lost:      { label: "LOST ✗",   color: "#ff6b6b" },
+    filled:    { label: "pending…", color: "#79c0ff" },
+    submitted: { label: "pending…", color: "#9aa6b2" },
+    error:     { label: "error",    color: "#ff6b6b" },
   };
-  return <span style={{ color: colors[s] ?? "#9aa6b2" }}>{s}</span>;
+  const { label, color } = map[s] ?? { label: s, color: "#9aa6b2" };
+  return <span style={{ color }}>{label}</span>;
 }
