@@ -693,6 +693,29 @@ async def demo_tick(
             "price": sim_price, "won": won, "pnl": pnl,
         })
 
+    # Also fix any orphaned "filled" demo trades from previous deploys
+    orphans = db.execute(
+        select(Trade).where(
+            Trade.status == "filled",
+            Trade.is_paper == True,
+        )
+    ).scalars().all()
+    fixed = 0
+    now_dt = datetime.now(timezone.utc)
+    for t in orphans:
+        meta = t.order_meta or {}
+        orphan_p_up = float(meta.get("p_up", 0.55))
+        win_prob = orphan_p_up if t.side == "up" else (1 - orphan_p_up)
+        orphan_won = random.random() < win_prob
+        if orphan_won:
+            t.status = "won"
+            t.pnl_usdc = round(t.tokens_filled * 0.98 - t.stake_usdc, 4)
+        else:
+            t.status = "lost"
+            t.pnl_usdc = round(-t.stake_usdc, 4)
+        t.resolved_at = now_dt
+        fixed += 1
+
     db.commit()
 
     total_pnl = round(sum(t["pnl"] for t in placed), 2)
@@ -701,6 +724,7 @@ async def demo_tick(
         "side": side,
         "p_up": round(p_up, 4),
         "placed": len(placed),
+        "orphans_fixed": fixed,
         "total_pnl": total_pnl,
         "trades": placed,
     }
