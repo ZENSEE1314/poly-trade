@@ -130,8 +130,9 @@ async def admin_inject_test_trade(
     from ..services.polymarket import WINDOW_SECS
 
     now = int(time.time())
-    # Two windows back guarantees the window is fully closed (+30 s buffer)
-    ws = (now - (now % WINDOW_SECS)) - WINDOW_SECS
+    # Two full windows back guarantees close_ts is always > 30s in the past,
+    # regardless of where we are in the current window.
+    ws = (now - (now % WINDOW_SECS)) - 2 * WINDOW_SECS
 
     trade = Trade(
         user_id=user.id,

@@ -53,6 +53,8 @@ export const api = {
   predictions: () => req<any[]>("/api/predictions/latest"),
   myTrades: () => req<any[]>("/api/trades/mine"),
   myStats: () => req<any>("/api/stats/mine"),
+  adminInjectTrade: () => req<any>("/api/admin/inject-test-trade", { method: "POST" }),
+  adminReconcile: () => req<any>("/api/admin/run-reconcile", { method: "POST" }),
 };
 
 export function setToken(t: string) { localStorage.setItem("token", t); }
