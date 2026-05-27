@@ -1,6 +1,7 @@
+import traceback
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, desc, and_
 from sqlalchemy.orm import Session
 
@@ -84,3 +85,106 @@ def my_stats(user: User = Depends(get_current_user), db: Session = Depends(get_d
         "win_rate": (wins / len(resolved)) if resolved else None,
         "pnl_usdc_7d": pnl,
     }
+
+
+# ── Admin / diagnostics ─────────────────────────────────────────────
+
+@router.post("/admin/run-prediction")
+async def admin_run_prediction(
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Run one full prediction cycle inline (bypasses Celery). Use to verify the engine works."""
+    from ..ai.engine import forecast_for_window
+    from ..services.polymarket import next_window_ts
+
+    ws = next_window_ts()
+    try:
+        fc = await forecast_for_window(ws)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": str(e), "trace": traceback.format_exc()})
+
+    pred = Prediction(
+        window_ts=ws,
+        p_up=fc.p_up,
+        ml_p_up=fc.ml_p_up,
+        swarm_p_up=fc.swarm_p_up,
+        swarm_votes={"votes": [v.__dict__ for v in fc.votes]},
+        btc_price=fc.btc_price,
+        features=fc.features,
+    )
+    db.add(pred)
+    db.commit()
+    return fc.to_dict()
+
+
+@router.post("/admin/run-trade-tick")
+async def admin_run_trade_tick(_: User = Depends(get_current_user)):
+    """Manually fire a trade tick (ignores timing guard). Use after run-prediction."""
+    import asyncio, json, time
+    import redis as redis_lib
+    from ..core.config import get_settings
+    from ..services.polymarket import PolymarketClient, current_window_ts, paper_submit, OrderRequest
+    from ..services.risk import decide
+    from ..models import TradingProfile
+    from ..db.session import SessionLocal
+
+    cfg = get_settings()
+    r = redis_lib.from_url(cfg.REDIS_URL, decode_responses=True)
+    ws = current_window_ts()
+
+    # Try the cached forecast for either this window or next
+    cached = r.get(f"btc_oracle:pred:{ws + 300}") or r.get(f"btc_oracle:pred:{ws}")
+    if not cached:
+        raise HTTPException(status_code=404, detail="No forecast in Redis cache. Run /admin/run-prediction first.")
+
+    fc = json.loads(cached)
+    poly = PolymarketClient()
+    market = await poly.find_btc_market(ws)
+    if not market:
+        raise HTTPException(status_code=404, detail=f"No Polymarket BTC market found for window={ws}")
+
+    db: Session = SessionLocal()
+    placed = []
+    try:
+        from sqlalchemy import select as sa_select
+        users = db.execute(
+            sa_select(User)
+            .join(TradingProfile, TradingProfile.user_id == User.id)
+            .where(TradingProfile.auto_trade_enabled == True)
+        ).scalars().all()
+
+        for user in users:
+            profile = user.profile
+            if not profile:
+                continue
+            decision = decide(db, profile, fc["p_up"], market.up_best_ask, market.down_best_ask)
+            if not decision.should_trade:
+                placed.append({"user_id": user.id, "skipped": True, "reason": decision.reason})
+                continue
+
+            token_id = market.up_token_id if decision.side == "up" else market.down_token_id
+            ask = market.up_best_ask if decision.side == "up" else market.down_best_ask
+            req = OrderRequest(token_id=token_id, side="BUY", price=ask, size=decision.stake_usdc)
+            result = await paper_submit(req, ask)
+
+            trade = Trade(
+                user_id=user.id,
+                window_ts=ws,
+                market_slug=market.slug,
+                side=decision.side,
+                stake_usdc=decision.stake_usdc,
+                avg_price=result.avg_price,
+                tokens_filled=result.filled_size / max(result.avg_price, 1e-6),
+                is_paper=True,
+                status="filled" if result.success else "error",
+                order_meta=result.raw,
+            )
+            db.add(trade)
+            placed.append({"user_id": user.id, "side": decision.side, "stake": decision.stake_usdc, "price": result.avg_price})
+
+        db.commit()
+    finally:
+        db.close()
+
+    return {"window_ts": ws, "market_slug": market.slug, "p_up": fc["p_up"], "placed": placed}
