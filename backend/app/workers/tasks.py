@@ -188,15 +188,17 @@ def reconcile_open_trades() -> dict:
 
         from ..ai.market_data import fetch_klines
 
-        # Fetch klines once; 360 x 1-min candles covers every open trade window.
+        # Fetch klines once; 1440 x 1-min candles = 24 h covers every open trade window.
         try:
-            klines = asyncio.run(fetch_klines("1m", 360))
+            klines = asyncio.run(fetch_klines("1m", 1440))
         except Exception:
             log.exception("klines fetch failed; skipping reconcile")
             return {"ok": False}
 
+        import pandas as pd
         df = klines
-        df_ts = (df["open_time"].astype("int64") // 10**9).values
+        _epoch = pd.Timestamp("1970-01-01", tz="UTC")
+        df_ts = ((df["open_time"] - _epoch) / pd.Timedelta("1s")).astype("int64").values
 
         for t in open_trades:
             close_ts = t.window_ts + 300
