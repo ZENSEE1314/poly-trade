@@ -196,3 +196,68 @@ async def admin_run_trade_tick(_: User = Depends(get_current_user)):
         db.close()
 
     return {"window_ts": ws, "market_slug": market.slug, "p_up": fc["p_up"], "placed": placed}
+
+
+@router.post("/admin/force-paper-trade")
+async def admin_force_paper_trade(_: User = Depends(get_current_user)):
+    """Place a paper trade immediately — bypasses risk/edge checks entirely.
+    Useful for verifying the full trade → reconcile flow end-to-end."""
+    import asyncio, json, time
+    import redis as redis_lib
+    from ..core.config import get_settings
+    from ..services.polymarket import PolymarketClient, current_window_ts, paper_submit, OrderRequest
+    from ..db.session import SessionLocal
+
+    cfg = get_settings()
+    ws = current_window_ts()
+    poly = PolymarketClient()
+    market = await poly.find_btc_market(ws)
+    if not market:
+        raise HTTPException(status_code=404, detail=f"No Polymarket BTC market for window={ws}")
+
+    # Run a fresh prediction inline
+    from ..ai.engine import forecast_for_window
+    from ..services.polymarket import next_window_ts
+    fc = await forecast_for_window(next_window_ts())
+
+    # Force-pick the side our model prefers, stake $2 regardless of edge
+    side = "up" if fc.p_up >= 0.5 else "down"
+    ask  = market.up_best_ask if side == "up" else market.down_best_ask
+    token_id = market.up_token_id if side == "up" else market.down_token_id
+    stake = 2.0
+
+    req = OrderRequest(token_id=token_id, side="BUY", price=ask, size=stake)
+    result = await paper_submit(req, ask)
+
+    db: Session = SessionLocal()
+    try:
+        from ..models import Trade as TradeModel
+        trade = TradeModel(
+            user_id=_.id if hasattr(_, "id") else 2,
+            window_ts=ws,
+            market_slug=market.slug,
+            side=side,
+            stake_usdc=stake,
+            avg_price=result.avg_price,
+            tokens_filled=result.filled_size / max(result.avg_price, 1e-6),
+            is_paper=True,
+            status="filled" if result.success else "error",
+            order_meta=result.raw,
+        )
+        db.add(trade)
+        db.commit()
+        db.refresh(trade)
+        trade_id = trade.id
+    finally:
+        db.close()
+
+    return {
+        "trade_id": trade_id,
+        "window_ts": ws,
+        "market_slug": market.slug,
+        "side": side,
+        "p_up": round(fc.p_up, 4),
+        "ask": ask,
+        "stake": stake,
+        "success": result.success,
+    }
