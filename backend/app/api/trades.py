@@ -645,6 +645,8 @@ async def demo_tick(
 
     side = "up" if p_up >= 0.5 else "down"
     slug = f"btc-updown-5m-{ws}"
+    POLY_FEE = 0.02
+    now = datetime.now(timezone.utc)
     placed = []
 
     users = db.execute(
@@ -655,9 +657,22 @@ async def demo_tick(
         profile = user.profile
         if not profile:
             continue
+
         stake = min(float(getattr(profile, "max_stake_usdc", 100.0)), 100.0)
         sim_price = _sim_ask(p_up, side)
         tokens = round(stake / sim_price, 6)
+
+        # Resolve immediately using simulated outcome — no reconciler dependency.
+        # Win probability = p_up for "up" trades, (1-p_up) for "down" trades.
+        win_prob = p_up if side == "up" else (1 - p_up)
+        won = random.random() < win_prob
+        if won:
+            pnl = round(tokens * (1 - POLY_FEE) - stake, 4)
+            status = "won"
+        else:
+            pnl = round(-stake, 4)
+            status = "lost"
+
         trade = Trade(
             user_id=user.id,
             window_ts=ws,
@@ -667,17 +682,25 @@ async def demo_tick(
             avg_price=sim_price,
             tokens_filled=tokens,
             is_paper=True,
-            status="filled",
+            status=status,
+            pnl_usdc=pnl,
             order_meta={"demo": True, "p_up": round(p_up, 4)},
+            resolved_at=now,
         )
         db.add(trade)
-        placed.append({"user_id": user.id, "side": side, "stake": stake, "price": sim_price})
+        placed.append({
+            "user_id": user.id, "side": side, "stake": stake,
+            "price": sim_price, "won": won, "pnl": pnl,
+        })
 
     db.commit()
+
+    total_pnl = round(sum(t["pnl"] for t in placed), 2)
     return {
         "window_ts": ws,
         "side": side,
         "p_up": round(p_up, 4),
         "placed": len(placed),
+        "total_pnl": total_pnl,
         "trades": placed,
     }
