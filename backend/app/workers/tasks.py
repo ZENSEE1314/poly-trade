@@ -398,31 +398,25 @@ def reconcile_open_trades() -> dict:
         POLY_FEE = 0.02
 
         for t in ready:
-            won = None
+            if not klines_ok:
+                # No klines — don't guess. Leave as "filled" and retry next cycle.
+                # Never use a random draw; that produces wrong won/lost outcomes.
+                continue
 
-            if klines_ok:
-                # Real BTC price: use for ALL trades (demo and real alike)
-                open_idx = next((i for i, v in enumerate(df_ts) if v >= t.window_ts), None)
-                close_raw = next((i for i, v in enumerate(df_ts) if v >= t.window_ts + 300), None)
-                if open_idx is not None and close_raw and close_raw > 0:
-                    open_p = float(df["open"].iloc[open_idx])
-                    close_p = float(df["close"].iloc[close_raw - 1])
-                    went_up = close_p > open_p
-                    won = (t.side == "up" and went_up) or (t.side == "down" and not went_up)
+            # Determine real BTC direction for this window
+            open_idx = next((i for i, v in enumerate(df_ts) if v >= t.window_ts), None)
+            close_raw = next((i for i, v in enumerate(df_ts) if v >= t.window_ts + 300), None)
+            if open_idx is None or not close_raw or close_raw == 0:
+                # Klines don't cover this window (too old). Skip — stays filled.
+                continue
 
-            if won is None:
-                # Klines unavailable — fall back to probability draw for demo trades only
-                meta = t.order_meta or {}
-                if meta.get("demo"):
-                    p_up = float(meta.get("p_up", 0.55))
-                    win_prob = p_up if t.side == "up" else (1 - p_up)
-                    won = random.random() < win_prob
-                else:
-                    continue  # skip real trades if klines missing
+            open_p  = float(df["open"].iloc[open_idx])
+            close_p = float(df["close"].iloc[close_raw - 1])
+            went_up = close_p > open_p
+            won = (t.side == "up" and went_up) or (t.side == "down" and not went_up)
 
             if won:
                 t.status = "won"
-                # binary payout: 2% fee on wins
                 t.pnl_usdc = round(t.tokens_filled * (1 - POLY_FEE) - t.stake_usdc, 4)
             else:
                 t.status = "lost"
@@ -437,3 +431,72 @@ def reconcile_open_trades() -> dict:
     finally:
         db.close()
     return {"ok": True, "resolved": resolved}
+
+
+@celery_app.task(name="app.workers.tasks.fix_demo_outcomes")
+def fix_demo_outcomes() -> dict:
+    """One-shot correction: re-check every demo trade (won OR lost) against
+    real BTC klines and flip any that have the wrong outcome.
+
+    Trades that were randomly resolved (no klines at reconcile time) may be
+    marked 'won' even though BTC went the other way. This task corrects them.
+    Only fixes trades whose window falls within the available klines window.
+    """
+    from ..ai.market_data import fetch_klines
+
+    try:
+        df = asyncio.run(fetch_klines("1m", 720))
+    except Exception as exc:
+        log.warning("fix_demo_outcomes: klines fetch failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+    df_ts = (df["open_time"].astype("int64") // 10**9).values
+    POLY_FEE = 0.02
+    now_dt = datetime.now(timezone.utc)
+
+    db: Session = SessionLocal()
+    fixed = 0
+    try:
+        # Re-check ALL resolved demo trades within the klines window
+        demo_trades = db.execute(
+            select(Trade).where(
+                Trade.is_paper == True,
+                Trade.status.in_(["won", "lost", "filled"]),
+            )
+        ).scalars().all()
+
+        for t in demo_trades:
+            meta = t.order_meta or {}
+            if not meta.get("demo"):
+                continue
+
+            open_idx = next((i for i, v in enumerate(df_ts) if v >= t.window_ts), None)
+            close_raw = next((i for i, v in enumerate(df_ts) if v >= t.window_ts + 300), None)
+            if open_idx is None or not close_raw or close_raw == 0:
+                continue  # outside klines window — can't verify
+
+            open_p  = float(df["open"].iloc[open_idx])
+            close_p = float(df["close"].iloc[close_raw - 1])
+            went_up = close_p > open_p
+            correct_won = (t.side == "up" and went_up) or (t.side == "down" and not went_up)
+
+            correct_status = "won" if correct_won else "lost"
+            if t.status != correct_status:
+                # Wrong — flip it
+                if correct_won:
+                    t.status = "won"
+                    t.pnl_usdc = round(t.tokens_filled * (1 - POLY_FEE) - t.stake_usdc, 4)
+                else:
+                    t.status = "lost"
+                    t.pnl_usdc = round(-t.stake_usdc, 4)
+                t.resolved_at = now_dt
+                fixed += 1
+
+        db.commit()
+        log.info("fix_demo_outcomes: corrected %d trades", fixed)
+    finally:
+        db.close()
+
+    if fixed:
+        _publish({"type": "resolved", "count": fixed, "source": "fix_demo_outcomes"})
+    return {"ok": True, "fixed": fixed}

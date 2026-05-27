@@ -1,6 +1,5 @@
 import asyncio
 import json
-import random
 import traceback
 from datetime import datetime, timezone, timedelta
 
@@ -172,6 +171,85 @@ async def stream_events(user: User = Depends(get_current_user_sse)):
             "Connection": "keep-alive",
         },
     )
+
+
+# ── Fix wrong outcomes ───────────────────────────────────────────────
+
+@router.post("/admin/fix-outcomes")
+async def admin_fix_outcomes(key: str = Query(...), db: Session = Depends(get_db)):
+    """Re-check every demo trade against real BTC klines and correct any
+    wrong won/lost outcomes. Call once after deploy to fix historical errors.
+
+    POST /api/admin/fix-outcomes?key=btc-oracle-demo-2026
+    """
+    if key != "btc-oracle-demo-2026":
+        raise HTTPException(status_code=403, detail="Invalid key")
+
+    import httpx, math
+    import pandas as pd
+
+    # Fetch 1-min klines directly (same Kraken source as market_data)
+    async def _klines(n: int):
+        end_ts = int(datetime.now(timezone.utc).timestamp())
+        since = end_ts - n * 60
+        async with httpx.AsyncClient(timeout=20, verify=False) as cli:
+            r = await cli.get(
+                "https://api.kraken.com/0/public/OHLC",
+                params={"pair": "XBTUSD", "interval": 1, "since": since},
+            )
+            data = r.json()
+            result = data.get("result", {})
+            pair = (result.get("XXBTZUSD") or result.get("XBTUSD")
+                    or next((v for k, v in result.items() if k != "last"), None))
+            if not pair:
+                return None
+            df = pd.DataFrame(pair, columns=[
+                "open_time", "open", "high", "low", "close", "vwap", "volume", "count"])
+            df = df.drop_duplicates("open_time").sort_values("open_time").reset_index(drop=True)
+            for c in ["open", "close"]:
+                df[c] = df[c].astype(float)
+            return df
+
+    df = await _klines(720)
+    if df is None or len(df) < 10:
+        raise HTTPException(status_code=503, detail="Klines fetch failed")
+
+    df_ts = df["open_time"].astype("int64").values
+    POLY_FEE = 0.02
+    now_dt = datetime.now(timezone.utc)
+
+    demo_trades = db.execute(
+        select(Trade).where(
+            Trade.is_paper == True,
+            Trade.status.in_(["won", "lost", "filled"]),
+        )
+    ).scalars().all()
+
+    fixed = 0
+    for t in demo_trades:
+        if not (t.order_meta or {}).get("demo"):
+            continue
+        open_idx = next((i for i, v in enumerate(df_ts) if v >= t.window_ts), None)
+        close_raw = next((i for i, v in enumerate(df_ts) if v >= t.window_ts + 300), None)
+        if open_idx is None or not close_raw or close_raw == 0:
+            continue
+        open_p  = float(df["open"].iloc[open_idx])
+        close_p = float(df["close"].iloc[close_raw - 1])
+        went_up = close_p > open_p
+        correct_won = (t.side == "up" and went_up) or (t.side == "down" and not went_up)
+        correct_status = "won" if correct_won else "lost"
+        if t.status != correct_status:
+            if correct_won:
+                t.status = "won"
+                t.pnl_usdc = round(t.tokens_filled * (1 - POLY_FEE) - t.stake_usdc, 4)
+            else:
+                t.status = "lost"
+                t.pnl_usdc = round(-t.stake_usdc, 4)
+            t.resolved_at = now_dt
+            fixed += 1
+
+    db.commit()
+    return {"fixed": fixed, "total_checked": len(demo_trades)}
 
 
 # ── Admin / diagnostics ─────────────────────────────────────────────
@@ -756,36 +834,15 @@ async def demo_tick(
             "user_id": user.id, "side": side, "stake": stake, "price": sim_price,
         })
 
-    # Also fix any orphaned "filled" demo trades from previous deploys
-    orphans = db.execute(
-        select(Trade).where(
-            Trade.status == "filled",
-            Trade.is_paper == True,
-        )
-    ).scalars().all()
-    fixed = 0
-    now_dt = datetime.now(timezone.utc)
-    for t in orphans:
-        meta = t.order_meta or {}
-        orphan_p_up = float(meta.get("p_up", 0.55))
-        win_prob = orphan_p_up if t.side == "up" else (1 - orphan_p_up)
-        orphan_won = random.random() < win_prob
-        if orphan_won:
-            t.status = "won"
-            t.pnl_usdc = round(t.tokens_filled * 0.98 - t.stake_usdc, 4)
-        else:
-            t.status = "lost"
-            t.pnl_usdc = round(-t.stake_usdc, 4)
-        t.resolved_at = now_dt
-        fixed += 1
-
     db.commit()
 
+    # NOTE: orphaned "filled" trades are resolved by the Celery reconciler using
+    # real BTC klines — never by random draw. Use /api/admin/fix-outcomes to
+    # correct any historical wrong outcomes.
     return {
         "window_ts": ws,
         "side": side,
         "p_up": round(p_up, 4),
         "placed": len(placed),
-        "orphans_fixed": fixed,
         "trades": placed,
     }
