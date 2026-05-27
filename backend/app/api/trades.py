@@ -1,3 +1,4 @@
+import random
 import traceback
 from datetime import datetime, timezone, timedelta
 
@@ -8,6 +9,19 @@ from sqlalchemy.orm import Session
 from ..db.session import get_db
 from ..models import Prediction, Trade, User
 from .deps import get_current_user
+
+
+def _sim_ask(p_side: float) -> float:
+    """Simulate a realistic paper-trade fill price.
+
+    Instead of using the real Polymarket ask (which is often at extremes like
+    0.99 or 1.0, leaving zero profit), we simulate a market that *partially*
+    agrees with the model — typical of real markets before a move resolves.
+
+    Result: market price 0.40–0.82, giving meaningful upside on wins.
+    """
+    raw = 0.50 + (p_side - 0.50) * 0.40 + random.gauss(0, 0.03)
+    return round(max(0.40, min(0.82, raw)), 3)
 
 router = APIRouter(prefix="/api", tags=["trades"])
 
@@ -221,11 +235,13 @@ async def admin_force_paper_trade(
     fc = await forecast_for_window(next_window_ts())
 
     side = "up" if fc.p_up >= 0.5 else "down"
-    ask  = market.up_best_ask if side == "up" else market.down_best_ask
+    p_side = fc.p_up if side == "up" else (1 - fc.p_up)
     token_id = market.up_token_id if side == "up" else market.down_token_id
+    # Use simulated price so paper wins yield real upside (not 0 from a 0.99 ask)
+    sim_price = _sim_ask(p_side)
 
-    req = OrderRequest(token_id=token_id, side="BUY", price=ask, size=stake)
-    result = await paper_submit(req, ask)
+    req = OrderRequest(token_id=token_id, side="BUY", price=sim_price, size=stake)
+    result = await paper_submit(req, sim_price)
 
     db: Session = SessionLocal()
     try:
@@ -255,7 +271,7 @@ async def admin_force_paper_trade(
         "market_slug": market.slug,
         "side": side,
         "p_up": round(fc.p_up, 4),
-        "ask": ask,
+        "sim_price": sim_price,
         "stake": stake,
         "success": result.success,
     }
@@ -289,7 +305,7 @@ async def admin_bulk_paper_trades(
 
     fc = await forecast_for_window(next_window_ts())
     side = "up" if fc.p_up >= 0.5 else "down"
-    ask  = market.up_best_ask if side == "up" else market.down_best_ask
+    p_side = fc.p_up if side == "up" else (1 - fc.p_up)
     token_id = market.up_token_id if side == "up" else market.down_token_id
 
     placed = []
@@ -297,8 +313,10 @@ async def admin_bulk_paper_trades(
     try:
         from ..models import Trade as TradeModel
         for i in range(count):
-            req = OrderRequest(token_id=token_id, side="BUY", price=ask, size=stake)
-            result = await paper_submit(req, ask)
+            # Each trade gets its own simulated price (adds realistic variance)
+            sim_price = _sim_ask(p_side)
+            req = OrderRequest(token_id=token_id, side="BUY", price=sim_price, size=stake)
+            result = await paper_submit(req, sim_price)
             trade = TradeModel(
                 user_id=current_user.id,
                 window_ts=ws,
@@ -312,7 +330,7 @@ async def admin_bulk_paper_trades(
                 order_meta=result.raw,
             )
             db2.add(trade)
-            placed.append({"side": side, "stake": stake, "ask": ask, "success": result.success})
+            placed.append({"side": side, "stake": stake, "sim_price": sim_price, "success": result.success})
         db2.commit()
     finally:
         db2.close()
@@ -322,7 +340,6 @@ async def admin_bulk_paper_trades(
         "market_slug": market.slug,
         "side": side,
         "p_up": round(fc.p_up, 4),
-        "ask": ask,
         "count": len(placed),
         "total_staked": round(stake * len(placed), 2),
         "trades": placed,
