@@ -359,6 +359,7 @@ async def admin_seed_history(
     min_confidence: float = 0.06,
     wipe_existing: bool = False,
     use_synthetic: bool = False,
+    seed: int = 7,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -420,7 +421,7 @@ async def admin_seed_history(
         return df.tail(n).reset_index(drop=True)
 
     def _synthetic(n: int):
-        np.random.seed(42)
+        np.random.seed(seed)
         ANNUAL = 365 * 24 * 12
         mu, sigma = 0.40 / ANNUAL, 0.65 / ANNUAL ** 0.5
         S0, closes = 103_500.0, [103_500.0]
