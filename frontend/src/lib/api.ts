@@ -53,6 +53,8 @@ export const api = {
   predictions: () => req<any[]>("/api/predictions/latest"),
   myTrades: (limit = 500) => req<any[]>(`/api/trades/mine?limit=${limit}`),
   myStats: () => req<any>("/api/stats/mine"),
+  manualTrade: (side: "up" | "down", stake: number) =>
+    req<any>("/api/trades/manual", { method: "POST", body: JSON.stringify({ side, stake }) }),
 };
 
 export function setToken(t: string) { localStorage.setItem("token", t); }

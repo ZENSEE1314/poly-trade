@@ -3,8 +3,9 @@ import json
 import traceback
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import select, desc, and_
 from sqlalchemy.orm import Session
 
@@ -171,6 +172,80 @@ async def stream_events(user: User = Depends(get_current_user_sse)):
             "Connection": "keep-alive",
         },
     )
+
+
+# ── Manual trade ────────────────────────────────────────────────────
+
+class ManualTradeRequest(BaseModel):
+    side: str           # "up" or "down"
+    stake: float = 100.0
+
+
+@router.post("/trades/manual")
+async def manual_trade(
+    body: ManualTradeRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Place a manual paper trade for the current 5-min window.
+
+    Uses the same simulated fill price and reconciler flow as bot trades.
+    The outcome (won/lost) is determined by real BTC klines after the window closes.
+    """
+    if body.side not in ("up", "down"):
+        raise HTTPException(status_code=400, detail="side must be 'up' or 'down'")
+    if body.stake < 1 or body.stake > 10_000:
+        raise HTTPException(status_code=400, detail="stake must be $1–$10,000")
+
+    from ..services.polymarket import current_window_ts
+    import redis as _redis
+
+    ws = current_window_ts()
+
+    # Get latest p_up from Redis so the sim price is calibrated correctly
+    _r_sync = _redis.from_url(_settings.REDIS_URL, decode_responses=True)
+    cached = _r_sync.get(f"btc_oracle:pred:{ws + 300}") or _r_sync.get(f"btc_oracle:pred:{ws}")
+    p_up = json.loads(cached)["p_up"] if cached else 0.5
+
+    sim_price = _sim_ask(p_up, body.side)
+    tokens = round(body.stake / sim_price, 6)
+
+    trade = Trade(
+        user_id=user.id,
+        window_ts=ws,
+        market_slug=f"btc-updown-5m-{ws}",
+        side=body.side,
+        stake_usdc=body.stake,
+        avg_price=sim_price,
+        tokens_filled=tokens,
+        is_paper=True,
+        status="filled",
+        pnl_usdc=0.0,
+        order_meta={"manual": True, "p_up": round(p_up, 4)},
+    )
+    db.add(trade)
+    db.commit()
+    db.refresh(trade)
+
+    # Notify dashboard via SSE so History updates immediately
+    _r_sync.publish(SSE_CHANNEL, json.dumps({
+        "type": "trade",
+        "window_ts": ws,
+        "side": body.side,
+        "manual": True,
+        "count": 1,
+    }))
+
+    return {
+        "trade_id": trade.id,
+        "window_ts": ws,
+        "side": body.side,
+        "stake_usdc": body.stake,
+        "avg_price": sim_price,
+        "tokens_filled": tokens,
+        "status": "filled",
+        "note": "Outcome resolved by Celery reconciler after the window closes.",
+    }
 
 
 # ── Fix wrong outcomes ───────────────────────────────────────────────

@@ -86,6 +86,8 @@ def run_prediction_cycle() -> dict:
         "ml_p_up": round(fc.ml_p_up, 4),
         "swarm_p_up": round(fc.swarm_p_up, 4),
         "btc_price": round(fc.btc_price, 2),
+        # Include votes so the dashboard swarm panel updates without a page refresh
+        "votes": {"votes": [v.__dict__ for v in fc.votes]},
     })
 
     # Piggyback: place a simulated paper trade once per 5-min window.
