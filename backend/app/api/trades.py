@@ -118,6 +118,111 @@ async def admin_run_prediction(
     return fc.to_dict()
 
 
+@router.post("/admin/inject-test-trade")
+async def admin_inject_test_trade(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create a paper trade for the most-recently-closed 5-min window.
+    Bypasses prediction, decide(), and Polymarket entirely — use this to
+    verify the reconcile flow works before worrying about edge/confidence."""
+    import time
+    from ..services.polymarket import WINDOW_SECS
+
+    now = int(time.time())
+    # Two windows back guarantees the window is fully closed (+30 s buffer)
+    ws = (now - (now % WINDOW_SECS)) - WINDOW_SECS
+
+    trade = Trade(
+        user_id=user.id,
+        window_ts=ws,
+        market_slug=f"bitcoin-up-or-down-{ws}",
+        side="up",
+        stake_usdc=1.0,
+        avg_price=0.50,
+        tokens_filled=2.0,   # 1 USDC / 0.50 = 2 tokens
+        is_paper=True,
+        status="filled",
+        order_meta={"paper": True, "injected": True},
+    )
+    db.add(trade)
+    db.commit()
+    db.refresh(trade)
+    return {
+        "trade_id": trade.id,
+        "window_ts": ws,
+        "window_closed_at": ws + WINDOW_SECS,
+        "message": "Test trade injected — call POST /api/admin/run-reconcile to resolve it.",
+    }
+
+
+@router.post("/admin/run-reconcile")
+async def admin_run_reconcile(
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Resolve all filled trades inline (bypasses Celery). Call this after the window closes."""
+    import asyncio, time
+    from datetime import datetime, timezone
+    import pandas as pd
+    from sqlalchemy import select as sa_select
+    from ..ai.market_data import fetch_klines
+
+    open_trades = db.execute(
+        sa_select(Trade).where(Trade.status == "filled")
+    ).scalars().all()
+
+    if not open_trades:
+        return {"ok": True, "message": "No filled trades to reconcile", "resolved": []}
+
+    try:
+        klines = await fetch_klines("1m", 1440)  # 24 hours of 1-min candles
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Klines fetch failed: {exc}")
+
+    df = klines
+    # Robustly convert timezone-aware datetimes to Unix seconds
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+    df_ts = ((df["open_time"] - epoch) / pd.Timedelta("1s")).astype("int64").values
+
+    now = int(time.time())
+    resolved = []
+    skipped = []
+
+    for t in open_trades:
+        close_ts = t.window_ts + 300
+        if now < close_ts + 30:
+            skipped.append({"trade_id": t.id, "reason": "window not closed yet", "closes_in": close_ts + 30 - now})
+            continue
+
+        open_idx = next((i for i, v in enumerate(df_ts) if v >= t.window_ts), None)
+        close_raw = next((i for i, v in enumerate(df_ts) if v >= close_ts), None)
+        if open_idx is None:
+            skipped.append({"trade_id": t.id, "reason": "window_ts not in klines range", "window_ts": t.window_ts, "klines_start": int(df_ts[0])})
+            continue
+        if close_raw is None or close_raw == 0:
+            skipped.append({"trade_id": t.id, "reason": "close_ts not in klines range", "close_ts": close_ts, "klines_end": int(df_ts[-1])})
+            continue
+
+        close_idx = close_raw - 1
+        open_p = float(df["open"].iloc[open_idx])
+        close_p = float(df["close"].iloc[close_idx])
+        went_up = close_p > open_p
+        won = (t.side == "up" and went_up) or (t.side == "down" and not went_up)
+
+        t.status = "won" if won else "lost"
+        t.pnl_usdc = round(t.tokens_filled - t.stake_usdc, 4) if won else round(-t.stake_usdc, 4)
+        t.resolved_at = datetime.now(timezone.utc)
+        resolved.append({
+            "trade_id": t.id, "side": t.side, "status": t.status,
+            "open_price": open_p, "close_price": close_p,
+            "pnl_usdc": t.pnl_usdc,
+        })
+
+    db.commit()
+    return {"ok": True, "resolved": resolved, "skipped": skipped}
+
+
 @router.post("/admin/run-trade-tick")
 async def admin_run_trade_tick(_: User = Depends(get_current_user)):
     """Manually fire a trade tick (ignores timing guard). Use after run-prediction."""
@@ -187,4 +292,10 @@ async def admin_run_trade_tick(_: User = Depends(get_current_user)):
     finally:
         db.close()
 
-    return {"window_ts": ws, "market_slug": market.slug, "p_up": fc["p_up"], "placed": placed}
+    trades_created = sum(1 for p in placed if "skipped" not in p)
+    hint = None
+    if trades_created == 0 and placed:
+        reasons = list({p["reason"] for p in placed if p.get("skipped")})
+        hint = f"All trades skipped ({'; '.join(reasons)}). Use POST /api/admin/inject-test-trade to bypass decide() and test the reconcile flow."
+
+    return {"window_ts": ws, "market_slug": market.slug, "p_up": fc["p_up"], "placed": placed, "hint": hint}
