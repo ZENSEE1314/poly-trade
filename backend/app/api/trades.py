@@ -59,7 +59,7 @@ def latest_predictions(
 
 @router.get("/trades/mine")
 def my_trades(
-    limit: int = 50,
+    limit: int = 500,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):

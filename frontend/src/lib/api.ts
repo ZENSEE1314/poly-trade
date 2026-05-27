@@ -51,7 +51,7 @@ export const api = {
   getProfile: () => req<any>("/api/profile"),
   updateProfile: (p: any) => req("/api/profile", { method: "PATCH", body: JSON.stringify(p) }),
   predictions: () => req<any[]>("/api/predictions/latest"),
-  myTrades: () => req<any[]>("/api/trades/mine"),
+  myTrades: (limit = 500) => req<any[]>(`/api/trades/mine?limit=${limit}`),
   myStats: () => req<any>("/api/stats/mine"),
 };
 

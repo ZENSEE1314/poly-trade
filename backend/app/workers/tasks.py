@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 from datetime import datetime, timezone
 
@@ -171,6 +172,96 @@ def _attempt_user_trade(db: Session, user: User, ws: int, fc: dict, market) -> i
     )
     db.add(trade)
     return 1
+
+
+# ───────────────────────── Simulated price helper ─────────────────────────
+
+def _sim_ask(p_up: float, side: str) -> float:
+    """Simulated fill price — less-informed market assumption.
+
+    Mirrors the backtest_10k.py formula so paper wins yield realistic upside
+    rather than $0 profit that happens when real ask≈0.99.
+    """
+    conf = abs(p_up - 0.5) * 2
+    direction = 0.15 if side == "up" else -0.15
+    raw = 0.50 + direction * conf + random.gauss(0, 0.03)
+    return round(max(0.35, min(0.90, raw)), 3)
+
+
+# ───────────────────────── Paper demo tick ─────────────────────────
+
+@celery_app.task(name="app.workers.tasks.paper_demo_tick")
+def paper_demo_tick() -> dict:
+    """Place one simulated paper trade per eligible user every 5 minutes.
+
+    Completely independent of real Polymarket quotes — uses _sim_ask pricing
+    so wins yield $40–$115 profit per $100 stake regardless of market extremes.
+    Bypasses all risk / edge checks so trades flow continuously.
+    """
+    ws = current_window_ts()
+
+    # Use cached forecast; fall back to running one inline
+    cached = (
+        _r.get(f"btc_oracle:pred:{ws + 300}")
+        or _r.get(f"btc_oracle:pred:{ws}")
+    )
+    if cached:
+        p_up = json.loads(cached)["p_up"]
+    else:
+        try:
+            fc = asyncio.run(forecast_for_window(ws))
+            p_up = fc.p_up
+        except Exception as exc:
+            log.warning("paper_demo_tick: forecast failed: %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+    side = "up" if p_up >= 0.5 else "down"
+    slug = f"btc-updown-5m-{ws}"
+
+    placed = 0
+    db: Session = SessionLocal()
+    try:
+        users_with_profile = db.execute(
+            select(User)
+            .join(TradingProfile, TradingProfile.user_id == User.id)
+            .where(TradingProfile.auto_trade_enabled == True)
+        ).scalars().all()
+
+        for user in users_with_profile:
+            # One demo trade per user per 5-min window (idempotency)
+            lock = f"btc_oracle:demo:{ws}:{user.id}"
+            if not _r.set(lock, "1", nx=True, ex=600):
+                continue
+
+            profile = user.profile
+            if not profile:
+                continue
+
+            stake = min(float(getattr(profile, "max_stake_usdc", 100.0)), 100.0)
+            sim_price = _sim_ask(p_up, side)
+            tokens = round(stake / sim_price, 6)
+
+            trade = Trade(
+                user_id=user.id,
+                window_ts=ws,
+                market_slug=slug,
+                side=side,
+                stake_usdc=stake,
+                avg_price=sim_price,
+                tokens_filled=tokens,
+                is_paper=True,
+                status="filled",
+                order_meta={"demo": True, "p_up": round(p_up, 4)},
+            )
+            db.add(trade)
+            placed += 1
+
+        db.commit()
+    finally:
+        db.close()
+
+    log.info("paper_demo_tick ws=%s side=%s p_up=%.3f placed=%d", ws, side, p_up, placed)
+    return {"ok": True, "window_ts": ws, "side": side, "p_up": round(p_up, 4), "placed": placed}
 
 
 # ───────────────────────── Reconciliation ─────────────────────────

@@ -34,5 +34,10 @@ celery_app.conf.update(
             "task": "app.workers.tasks.reconcile_open_trades",
             "schedule": 60.0,
         },
+        # Simulated paper trade every 5-min window — bypasses real market / edge checks
+        "paper-demo-tick": {
+            "task": "app.workers.tasks.paper_demo_tick",
+            "schedule": 300.0,
+        },
     },
 )
