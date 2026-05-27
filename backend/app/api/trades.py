@@ -199,16 +199,16 @@ async def admin_run_trade_tick(_: User = Depends(get_current_user)):
 
 
 @router.post("/admin/force-paper-trade")
-async def admin_force_paper_trade(_: User = Depends(get_current_user)):
+async def admin_force_paper_trade(
+    stake: float = 100.0,
+    _: User = Depends(get_current_user),
+):
     """Place a paper trade immediately — bypasses risk/edge checks entirely.
-    Useful for verifying the full trade → reconcile flow end-to-end."""
-    import asyncio, json, time
-    import redis as redis_lib
-    from ..core.config import get_settings
+    Useful for verifying the full trade → reconcile flow end-to-end.
+    Pass ?stake=N to override the default $100 stake."""
     from ..services.polymarket import PolymarketClient, current_window_ts, paper_submit, OrderRequest
     from ..db.session import SessionLocal
 
-    cfg = get_settings()
     ws = current_window_ts()
     poly = PolymarketClient()
     market = await poly.find_btc_market(ws)
@@ -220,11 +220,9 @@ async def admin_force_paper_trade(_: User = Depends(get_current_user)):
     from ..services.polymarket import next_window_ts
     fc = await forecast_for_window(next_window_ts())
 
-    # Force-pick the side our model prefers, stake $2 regardless of edge
     side = "up" if fc.p_up >= 0.5 else "down"
     ask  = market.up_best_ask if side == "up" else market.down_best_ask
     token_id = market.up_token_id if side == "up" else market.down_token_id
-    stake = 2.0
 
     req = OrderRequest(token_id=token_id, side="BUY", price=ask, size=stake)
     result = await paper_submit(req, ask)
@@ -233,7 +231,7 @@ async def admin_force_paper_trade(_: User = Depends(get_current_user)):
     try:
         from ..models import Trade as TradeModel
         trade = TradeModel(
-            user_id=_.id if hasattr(_, "id") else 2,
+            user_id=_.id,
             window_ts=ws,
             market_slug=market.slug,
             side=side,
@@ -260,4 +258,72 @@ async def admin_force_paper_trade(_: User = Depends(get_current_user)):
         "ask": ask,
         "stake": stake,
         "success": result.success,
+    }
+
+
+@router.post("/admin/bulk-paper-trades")
+async def admin_bulk_paper_trades(
+    count: int = 20,
+    stake: float = 100.0,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Place `count` paper trades back-to-back (each in the current window).
+    Bypasses all risk/edge checks. Used to quickly seed trade history.
+    Pass ?count=30&stake=100 etc."""
+    from ..services.polymarket import PolymarketClient, current_window_ts, paper_submit, OrderRequest
+    from ..ai.engine import forecast_for_window
+    from ..services.polymarket import next_window_ts
+    from ..db.session import SessionLocal
+
+    if count < 1 or count > 100:
+        raise HTTPException(status_code=400, detail="count must be 1-100")
+    if stake < 1 or stake > 10_000:
+        raise HTTPException(status_code=400, detail="stake must be $1-$10,000")
+
+    ws = current_window_ts()
+    poly = PolymarketClient()
+    market = await poly.find_btc_market(ws)
+    if not market:
+        raise HTTPException(status_code=404, detail=f"No Polymarket BTC market for window={ws}")
+
+    fc = await forecast_for_window(next_window_ts())
+    side = "up" if fc.p_up >= 0.5 else "down"
+    ask  = market.up_best_ask if side == "up" else market.down_best_ask
+    token_id = market.up_token_id if side == "up" else market.down_token_id
+
+    placed = []
+    db2 = SessionLocal()
+    try:
+        from ..models import Trade as TradeModel
+        for i in range(count):
+            req = OrderRequest(token_id=token_id, side="BUY", price=ask, size=stake)
+            result = await paper_submit(req, ask)
+            trade = TradeModel(
+                user_id=current_user.id,
+                window_ts=ws,
+                market_slug=market.slug,
+                side=side,
+                stake_usdc=stake,
+                avg_price=result.avg_price,
+                tokens_filled=result.filled_size / max(result.avg_price, 1e-6),
+                is_paper=True,
+                status="filled" if result.success else "error",
+                order_meta=result.raw,
+            )
+            db2.add(trade)
+            placed.append({"side": side, "stake": stake, "ask": ask, "success": result.success})
+        db2.commit()
+    finally:
+        db2.close()
+
+    return {
+        "window_ts": ws,
+        "market_slug": market.slug,
+        "side": side,
+        "p_up": round(fc.p_up, 4),
+        "ask": ask,
+        "count": len(placed),
+        "total_staked": round(stake * len(placed), 2),
+        "trades": placed,
     }
