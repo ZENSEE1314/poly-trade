@@ -344,3 +344,250 @@ async def admin_bulk_paper_trades(
         "total_staked": round(stake * len(placed), 2),
         "trades": placed,
     }
+
+
+# ── Seed historical trade data ─────────────────────────────────────────────
+
+@router.post("/admin/seed-history")
+async def admin_seed_history(
+    candles: int = 600,
+    stake: float = 100.0,
+    min_confidence: float = 0.06,
+    wipe_existing: bool = False,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Replay the heuristic model on real Kraken 5-min candles and write
+    historical trades with actual BTC outcomes to the DB.
+
+    ?candles=600   — how many 5-min candles to load (~2 days)
+    ?stake=100     — USDC stake per trade
+    ?min_confidence=0.06  — only trade when |p_up-0.5|*2 > this
+    ?wipe_existing=true   — delete ALL existing trades for this user first
+    """
+    import math
+    import numpy as np
+    import pandas as pd
+    import httpx
+
+    POLY_FEE = 0.02          # 2% fee on wins (paper simulation)
+    MAX_DAILY = 20           # cap trades per UTC day
+    SLUG_TPL  = "btc-updown-5m-{ws}"
+
+    # ── 1. Fetch candles ──────────────────────────────────────────────────
+    async def _kraken(n: int):
+        rows_per_call = 720
+        calls = math.ceil(n / rows_per_call)
+        end_ts = int(datetime.now(timezone.utc).timestamp())
+        since = end_ts - n * 5 * 60
+        all_rows = []
+        async with httpx.AsyncClient(timeout=20, verify=False) as cli:
+            for _ in range(calls):
+                try:
+                    r = await cli.get(
+                        "https://api.kraken.com/0/public/OHLC",
+                        params={"pair": "XBTUSD", "interval": 5, "since": since},
+                    )
+                    data = r.json()
+                    if data.get("error"):
+                        return None
+                    result = data.get("result", {})
+                    pair = (result.get("XXBTZUSD")
+                            or result.get("XBTUSD")
+                            or next((v for k, v in result.items() if k != "last"), None))
+                    if not pair:
+                        return None
+                    all_rows.extend(pair)
+                    since = result.get("last", since)
+                except Exception:
+                    return None
+        if not all_rows:
+            return None
+        df = pd.DataFrame(
+            all_rows,
+            columns=["open_time", "open", "high", "low", "close", "vwap", "volume", "count"],
+        )
+        df = df.drop_duplicates("open_time").sort_values("open_time").reset_index(drop=True)
+        for c in ["open", "high", "low", "close", "volume"]:
+            df[c] = df[c].astype(float)
+        return df.tail(n).reset_index(drop=True)
+
+    def _synthetic(n: int):
+        np.random.seed(42)
+        ANNUAL = 365 * 24 * 12
+        mu, sigma = 0.40 / ANNUAL, 0.65 / ANNUAL ** 0.5
+        S0, closes = 103_500.0, [103_500.0]
+        for _ in range(n - 1):
+            closes.append(closes[-1] * math.exp((mu - 0.5 * sigma**2) + sigma * np.random.randn()))
+        closes = np.array(closes)
+        noise  = np.random.uniform(0.0005, 0.003, n)
+        opens  = np.roll(closes, 1); opens[0] = S0
+        highs  = np.maximum(opens, closes) * (1 + noise * np.random.uniform(0.3, 1, n))
+        lows   = np.minimum(opens, closes) * (1 - noise * np.random.uniform(0.3, 1, n))
+        vols   = np.random.lognormal(7, 0.8, n)
+        now    = int(datetime.now(timezone.utc).timestamp())
+        times  = np.arange(now - n * 300, now, 300)[:n]
+        return pd.DataFrame({
+            "open_time": times, "open": opens, "high": highs,
+            "low": lows, "close": closes, "volume": vols,
+        })
+
+    raw = await _kraken(candles)
+    source = "kraken"
+    if raw is None or len(raw) < 100:
+        raw = _synthetic(candles)
+        source = "synthetic"
+
+    # ── 2. Feature engineering ────────────────────────────────────────────
+    d = raw.copy()
+    d["ret_5m"]  = d["close"].pct_change(1)
+    d["ret_15m"] = d["close"].pct_change(3)
+    d["ret_60m"] = d["close"].pct_change(12)
+
+    delta = d["close"].diff()
+    gain  = delta.clip(lower=0).rolling(14).mean()
+    loss  = (-delta.clip(upper=0)).rolling(14).mean()
+    d["rsi_14"] = 100 - 100 / (1 + gain / loss.replace(0, 1e-9))
+
+    ema12 = d["close"].ewm(span=12, adjust=False).mean()
+    ema26 = d["close"].ewm(span=26, adjust=False).mean()
+    macd  = ema12 - ema26
+    d["macd_diff"] = macd - macd.ewm(span=9, adjust=False).mean()
+
+    sma20, std20 = d["close"].rolling(20).mean(), d["close"].rolling(20).std()
+    d["bb_pctb"] = (d["close"] - (sma20 - 2 * std20)) / (4 * std20 + 1e-9)
+
+    vm, vs = d["volume"].rolling(20).mean(), d["volume"].rolling(20).std()
+    d["vol_z"] = (d["volume"] - vm) / (vs + 1e-9)
+
+    body = abs(d["close"] - d["open"])
+    d["upper_wick"] = (d["high"] - d[["close", "open"]].max(axis=1)) / (body + 1e-9)
+    d["lower_wick"] = (d[["close", "open"]].min(axis=1) - d["low"])  / (body + 1e-9)
+    d["ema_ratio"]  = d["close"] / d["close"].ewm(span=50, adjust=False).mean() - 1
+
+    d = d.dropna().reset_index(drop=True)
+
+    # ── 3. Heuristic swarm (mirrors backtest_10k.py) ──────────────────────
+    def _logit(p):
+        p = max(min(p, 1 - 1e-4), 1e-4)
+        return math.log(p / (1 - p))
+
+    def _sigmoid(x):
+        return 1 / (1 + math.exp(-x))
+
+    def _heuristic_vote(persona, f):
+        r5   = f.get("ret_5m", 0)
+        rsi  = f.get("rsi_14", 50)
+        md   = f.get("macd_diff", 0)
+        bbp  = f.get("bb_pctb", 0.5)
+        vz   = f.get("vol_z", 0)
+        r60  = f.get("ret_60m", 0)
+        r15  = f.get("ret_15m", 0)
+        er   = f.get("ema_ratio", 0)
+        if   persona == "TapeReader":  score = 4*r5 + 0.6*md + 0.03*(rsi-50)
+        elif persona == "Contrarian":  score = -3*r5 - 0.05*(rsi-50) - 2*(bbp-0.5)
+        elif persona == "MicroQuant":
+            score = (-1.0*f.get("upper_wick",0) + 1.0*f.get("lower_wick",0)
+                     + 0.3*vz*(1 if r5>=0 else -1))
+        elif persona == "MacroBias":   score = 3*r60 + 2*r15 + 1.5*er
+        else:                          return ("neutral", 0.15)
+        if   score >  0.0015: return ("up",      min(0.9, abs(score)*80))
+        elif score < -0.0015: return ("down",    min(0.9, abs(score)*80))
+        else:                 return ("neutral", 0.3)
+
+    PERSONAS = ["TapeReader", "Contrarian", "MicroQuant", "MacroBias", "SentimentBot"]
+
+    def _predict(feats, ml_p=0.5):
+        lo = _logit(ml_p)
+        for p in PERSONAS:
+            vote, conf = _heuristic_vote(p, feats)
+            if   vote == "up":   lo += 1.2 * conf
+            elif vote == "down": lo -= 1.2 * conf
+        swarm_p = _sigmoid(0.6 * lo)
+        # ml proxy: momentum + RSI
+        r5  = feats.get("ret_5m", 0)
+        rsi = feats.get("rsi_14", 50)
+        ml  = min(max(0.5 + 2.5*r5 + 0.003*(rsi-50), 0.1), 0.9)
+        return 0.55*ml + 0.45*swarm_p
+
+    # ── 4. Wipe existing trades if requested ──────────────────────────────
+    if wipe_existing:
+        db.query(Trade).filter(Trade.user_id == current_user.id).delete()
+        db.commit()
+
+    # ── 5. Walk candles and generate trades ───────────────────────────────
+    created, daily_counts = [], {}
+    for i in range(50, len(d) - 1):
+        row  = d.iloc[i]
+        nrow = d.iloc[i + 1]
+        ts   = int(row["open_time"])
+        # Align to 5-min boundary (Polymarket uses 300-s windows)
+        ws = ts - (ts % 300)
+
+        date_key = datetime.fromtimestamp(ws, tz=timezone.utc).date()
+        if daily_counts.get(date_key, 0) >= MAX_DAILY:
+            continue
+
+        feats = row.to_dict()
+        p_up  = _predict(feats)
+        conf  = abs(p_up - 0.5) * 2
+
+        if conf < min_confidence:
+            continue
+
+        side   = "up" if p_up > 0.5 else "down"
+        p_side = p_up if side == "up" else (1 - p_up)
+
+        # Simulate market price: partially informed market + noise
+        sim_price = 0.5 + (p_side - 0.5) * 0.40 + random.gauss(0, 0.03)
+        sim_price = round(max(0.40, min(0.82, sim_price)), 3)
+
+        tokens  = stake / sim_price
+        went_up = float(nrow["close"]) > float(row["close"])
+        won     = (side == "up" and went_up) or (side == "down" and not went_up)
+
+        if won:
+            pnl = round(tokens * (1 - POLY_FEE) - stake, 4)
+        else:
+            pnl = round(-stake, 4)
+
+        resolved_at = datetime.fromtimestamp(ws + 300, tz=timezone.utc)
+        trade = Trade(
+            user_id=current_user.id,
+            window_ts=ws,
+            market_slug=SLUG_TPL.format(ws=ws),
+            side=side,
+            stake_usdc=stake,
+            avg_price=sim_price,
+            tokens_filled=round(tokens, 6),
+            is_paper=True,
+            status="won" if won else "lost",
+            pnl_usdc=pnl,
+            order_meta={"seeded": True, "source": source, "p_up": round(p_up, 4)},
+            created_at=datetime.fromtimestamp(ws, tz=timezone.utc),
+            resolved_at=datetime.fromtimestamp(ws + 300, tz=timezone.utc),
+        )
+        db.add(trade)
+        created.append({
+            "ws": ws, "side": side, "p_up": round(p_up, 4),
+            "sim_price": sim_price, "won": won, "pnl": pnl,
+        })
+        daily_counts[date_key] = daily_counts.get(date_key, 0) + 1
+
+    db.commit()
+
+    wins   = sum(1 for t in created if t["won"])
+    losses = len(created) - wins
+    total_pnl = round(sum(t["pnl"] for t in created), 2)
+    win_rate  = round(wins / len(created) * 100, 1) if created else 0
+
+    return {
+        "source": source,
+        "candles_used": len(d),
+        "trades_created": len(created),
+        "wins": wins,
+        "losses": losses,
+        "win_rate_pct": win_rate,
+        "total_pnl_usdc": total_pnl,
+        "sample": created[-5:],
+    }
