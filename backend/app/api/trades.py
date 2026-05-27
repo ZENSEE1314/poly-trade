@@ -605,3 +605,79 @@ async def admin_seed_history(
         "total_pnl_usdc": total_pnl,
         "sample": created[-5:],
     }
+
+
+# ── Demo tick (no-auth, key-protected) ────────────────────────────────────────
+
+DEMO_KEY = "btc-oracle-demo-2026"
+
+@router.post("/demo-tick")
+async def demo_tick(
+    key: str = Query(..., description="Demo key"),
+    db: Session = Depends(get_db),
+):
+    """Place one simulated paper trade per user for the current 5-min window.
+
+    No JWT required — protected by a static demo key.
+    Used to force-trigger trades when Celery hasn't redeployed yet.
+
+    Call: POST /api/demo-tick?key=btc-oracle-demo-2026
+    """
+    if key != DEMO_KEY:
+        raise HTTPException(status_code=403, detail="Invalid demo key")
+
+    from ..services.polymarket import current_window_ts
+
+    ws = current_window_ts()
+
+    # Try cached forecast from Redis
+    import json as _json, redis as _redis
+    _r = _redis.from_url(_settings.REDIS_URL, decode_responses=True)
+    cached = _r.get(f"btc_oracle:pred:{ws + 300}") or _r.get(f"btc_oracle:pred:{ws}")
+    if cached:
+        p_up = _json.loads(cached)["p_up"]
+    else:
+        # Run inline forecast
+        from ..ai.engine import forecast_for_window
+        from ..services.polymarket import next_window_ts
+        fc = await forecast_for_window(next_window_ts())
+        p_up = fc.p_up
+
+    side = "up" if p_up >= 0.5 else "down"
+    slug = f"btc-updown-5m-{ws}"
+    placed = []
+
+    users = db.execute(
+        select(User).join(TradingProfile, TradingProfile.user_id == User.id)
+    ).scalars().all()
+
+    for user in users:
+        profile = user.profile
+        if not profile:
+            continue
+        stake = min(float(getattr(profile, "max_stake_usdc", 100.0)), 100.0)
+        sim_price = _sim_ask(p_up, side)
+        tokens = round(stake / sim_price, 6)
+        trade = Trade(
+            user_id=user.id,
+            window_ts=ws,
+            market_slug=slug,
+            side=side,
+            stake_usdc=stake,
+            avg_price=sim_price,
+            tokens_filled=tokens,
+            is_paper=True,
+            status="filled",
+            order_meta={"demo": True, "p_up": round(p_up, 4)},
+        )
+        db.add(trade)
+        placed.append({"user_id": user.id, "side": side, "stake": stake, "price": sim_price})
+
+    db.commit()
+    return {
+        "window_ts": ws,
+        "side": side,
+        "p_up": round(p_up, 4),
+        "placed": len(placed),
+        "trades": placed,
+    }
