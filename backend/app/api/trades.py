@@ -118,6 +118,44 @@ async def admin_run_prediction(
     return fc.to_dict()
 
 
+@router.post("/admin/inject-test-trade")
+async def admin_inject_test_trade(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create a paper trade for the most-recently-closed 5-min window.
+    Bypasses prediction, decide(), and Polymarket entirely — use this to
+    verify the reconcile flow works before worrying about edge/confidence."""
+    import time
+    from ..services.polymarket import WINDOW_SECS
+
+    now = int(time.time())
+    # Two windows back guarantees the window is fully closed (+30 s buffer)
+    ws = (now - (now % WINDOW_SECS)) - WINDOW_SECS
+
+    trade = Trade(
+        user_id=user.id,
+        window_ts=ws,
+        market_slug=f"bitcoin-up-or-down-{ws}",
+        side="up",
+        stake_usdc=1.0,
+        avg_price=0.50,
+        tokens_filled=2.0,   # 1 USDC / 0.50 = 2 tokens
+        is_paper=True,
+        status="filled",
+        order_meta={"paper": True, "injected": True},
+    )
+    db.add(trade)
+    db.commit()
+    db.refresh(trade)
+    return {
+        "trade_id": trade.id,
+        "window_ts": ws,
+        "window_closed_at": ws + WINDOW_SECS,
+        "message": "Test trade injected — call POST /api/admin/run-reconcile to resolve it.",
+    }
+
+
 @router.post("/admin/run-reconcile")
 async def admin_run_reconcile(
     _: User = Depends(get_current_user),
@@ -254,4 +292,10 @@ async def admin_run_trade_tick(_: User = Depends(get_current_user)):
     finally:
         db.close()
 
-    return {"window_ts": ws, "market_slug": market.slug, "p_up": fc["p_up"], "placed": placed}
+    trades_created = sum(1 for p in placed if "skipped" not in p)
+    hint = None
+    if trades_created == 0 and placed:
+        reasons = list({p["reason"] for p in placed if p.get("skipped")})
+        hint = f"All trades skipped ({'; '.join(reasons)}). Use POST /api/admin/inject-test-trade to bypass decide() and test the reconcile flow."
+
+    return {"window_ts": ws, "market_slug": market.slug, "p_up": fc["p_up"], "placed": placed, "hint": hint}
