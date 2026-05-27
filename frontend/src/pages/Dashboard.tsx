@@ -5,8 +5,16 @@ import { useStream } from "../lib/useStream";
 
 // ── Types ────────────────────────────────────────────────────────────
 
-type BotFeedEntry = { side: string; window_ts: number; count: number };
-type TradeMsg = { ok: boolean; text: string };
+type BotFeedEntry  = { side: string; window_ts: number; count: number };
+type TradeMsg      = { ok: boolean; text: string };
+type MlMeta        = {
+  trained: boolean;
+  val_accuracy?: number;
+  n_total?: number;
+  trained_at?: string;
+  top_features?: Array<{ feature: string; importance: number; pct: number }>;
+  message?: string;
+};
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -36,13 +44,19 @@ export default function Dashboard() {
   // Bot live feed — last 5 bot-placed trade events from SSE
   const [botFeed, setBotFeed] = useState<BotFeedEntry[]>([]);
 
+  // ML model self-learning stats
+  const [mlMeta, setMlMeta]       = useState<MlMeta | null>(null);
+  const [retraining, setRetraining] = useState(false);
+  const [retrainMsg, setRetrainMsg] = useState<string | null>(null);
+
   // ── Data loading ──────────────────────────────────────────────────
 
   const loadAll = useCallback(async () => {
     try {
-      const [p, s] = await Promise.all([api.predictions(), api.myStats()]);
+      const [p, s, ml] = await Promise.all([api.predictions(), api.myStats(), api.mlStats()]);
       setPreds(p.reverse());
       setStats(s);
+      setMlMeta(ml);
       setLastUpdate(new Date());
     } catch {}
   }, []);
@@ -86,6 +100,10 @@ export default function Dashboard() {
       api.myStats().then(setStats).catch(() => {});
       setLastUpdate(new Date());
     }
+    if (event.type === "model_retrained") {
+      // Refresh full model stats from API (SSE payload has accuracy + n_total)
+      api.mlStats().then(setMlMeta).catch(() => {});
+    }
   });
 
   // ── Manual trade ──────────────────────────────────────────────────
@@ -106,6 +124,21 @@ export default function Dashboard() {
       showTradeMsg({ ok: false, text: e.message || "Trade failed" });
     } finally {
       setPlacing(null);
+    }
+  };
+
+  // ── Trigger model retrain ────────────────────────────────────────
+
+  const triggerRetrain = async () => {
+    setRetraining(true);
+    setRetrainMsg(null);
+    try {
+      await api.mlRetrain();
+      setRetrainMsg("Training queued — model updates in ~30–60 s");
+    } catch (e: any) {
+      setRetrainMsg(`Error: ${e.message}`);
+    } finally {
+      setRetraining(false);
     }
   };
 
@@ -330,6 +363,98 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* ── Self-learning ML panel ── */}
+      <div style={card(18)}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 14 }}>
+          <div>
+            <h3 style={{ margin: 0 }}>Self-Learning Model</h3>
+            <span style={{ fontSize: 12, color: "#555" }}>
+              XGBoost · retrains every 6 h on real BTC data · auto-improves over time
+            </span>
+          </div>
+          <button
+            onClick={triggerRetrain}
+            disabled={retraining}
+            style={{
+              background: retraining ? "#1d2735" : "#388bfd18",
+              border: "1px solid #388bfd55",
+              borderRadius: 8,
+              color: retraining ? "#555" : "#388bfd",
+              padding: "6px 14px",
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: retraining ? "not-allowed" : "pointer",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {retraining ? "Queuing…" : "Train Now"}
+          </button>
+        </div>
+
+        {retrainMsg && (
+          <div style={{
+            marginBottom: 14,
+            padding: "7px 12px",
+            borderRadius: 7,
+            background: retrainMsg.startsWith("Error") ? "#ff6b6b18" : "#388bfd18",
+            color: retrainMsg.startsWith("Error") ? "#ff6b6b" : "#388bfd",
+            fontSize: 12,
+          }}>
+            {retrainMsg}
+          </div>
+        )}
+
+        {mlMeta?.trained ? (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 16 }}>
+              <Tile
+                label="Validation accuracy"
+                value={pct(mlMeta.val_accuracy!)}
+                accent={mlMeta.val_accuracy! >= 0.54 ? "#3fb950" : mlMeta.val_accuracy! >= 0.50 ? "#e3b341" : "#ff6b6b"}
+              />
+              <Tile label="Training samples" value={mlMeta.n_total?.toLocaleString() ?? "—"} />
+              <Tile
+                label="Last trained"
+                value={mlMeta.trained_at
+                  ? timeSince(mlMeta.trained_at) + " ago"
+                  : "—"}
+              />
+            </div>
+
+            {mlMeta.top_features && mlMeta.top_features.length > 0 && (
+              <div>
+                <div style={{ color: "#9aa6b2", fontSize: 12, marginBottom: 8 }}>
+                  Top features driving predictions
+                </div>
+                {mlMeta.top_features.map(f => (
+                  <div key={f.feature} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                    <span style={{ color: "#9aa6b2", fontSize: 12, width: 120, flexShrink: 0 }}>
+                      {f.feature}
+                    </span>
+                    <div style={{ flex: 1, background: "#1d2735", borderRadius: 4, height: 8, overflow: "hidden" }}>
+                      <div style={{
+                        width: `${f.pct}%`,
+                        height: "100%",
+                        background: "linear-gradient(90deg, #388bfd, #79c0ff)",
+                        borderRadius: 4,
+                        transition: "width 0.6s ease",
+                      }} />
+                    </div>
+                    <span style={{ color: "#555", fontSize: 11, width: 36, textAlign: "right" }}>
+                      {f.pct.toFixed(0)}%
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        ) : (
+          <div style={{ color: "#555", fontSize: 13, padding: "8px 0" }}>
+            {mlMeta?.message ?? "Loading model stats…"}
+          </div>
+        )}
+      </div>
+
       {/* ── 7-day stats ── */}
       {stats && (
         <div style={card(18)}>
@@ -385,6 +510,16 @@ function fmtCountdown(secs: number) {
   const m = Math.floor(secs / 60);
   const s = secs % 60;
   return `${m}m ${String(s).padStart(2, "0")}s`;
+}
+
+function timeSince(isoStr: string): string {
+  const diffMs  = Date.now() - new Date(isoStr).getTime();
+  const diffMin = Math.floor(diffMs / 60_000);
+  if (diffMin < 1)  return "just now";
+  if (diffMin < 60) return `${diffMin} min`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr  < 24) return `${diffHr} hr`;
+  return `${Math.floor(diffHr / 24)} d`;
 }
 
 function card(marginTop?: number): CSSProperties {

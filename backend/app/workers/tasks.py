@@ -435,6 +435,53 @@ def reconcile_open_trades() -> dict:
     return {"ok": True, "resolved": resolved}
 
 
+@celery_app.task(name="app.workers.tasks.retrain_model")
+def retrain_model() -> dict:
+    """Retrain the XGBoost direction model on recent real BTC klines.
+
+    Runs every 6 hours via beat. Also callable manually via
+    POST /api/ml/retrain?key=btc-oracle-demo-2026.
+
+    Flow:
+      1. Fetch 1500 × 1-min klines from Binance (~25 hours of data)
+      2. Build features + labels (was price higher 5 min later?)
+      3. Train XGBoost, evaluate on 20% holdout
+      4. Save model to disk + Redis
+      5. Hot-reload in this process so next prediction cycle uses it
+      6. Publish SSE event so the Dashboard updates accuracy badge
+    """
+    from ..ai.market_data import fetch_klines
+    from ..ai.engine import _model
+
+    log.info("retrain_model: fetching klines...")
+    try:
+        klines = asyncio.run(fetch_klines("1m", 1500))
+    except Exception as exc:
+        log.warning("retrain_model: klines fetch failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+    log.info("retrain_model: training on %d candles...", len(klines))
+    try:
+        meta = _model.train(klines)
+    except Exception as exc:
+        log.exception("retrain_model: training failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+    log.info(
+        "retrain_model: done accuracy=%.4f n_train=%d n_val=%d path=%s",
+        meta["val_accuracy"], meta["n_train"], meta["n_val"], meta.get("saved_path"),
+    )
+
+    _publish({
+        "type":         "model_retrained",
+        "val_accuracy": meta["val_accuracy"],
+        "n_total":      meta["n_total"],
+        "trained_at":   meta["trained_at"],
+    })
+
+    return {"ok": True, **meta}
+
+
 @celery_app.task(name="app.workers.tasks.fix_demo_outcomes")
 def fix_demo_outcomes() -> dict:
     """One-shot correction: re-check every demo trade (won OR lost) against

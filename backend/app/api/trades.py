@@ -327,6 +327,38 @@ async def admin_fix_outcomes(key: str = Query(...), db: Session = Depends(get_db
     return {"fixed": fixed, "total_checked": len(demo_trades)}
 
 
+# ── ML self-learning ────────────────────────────────────────────────
+
+@router.get("/ml/stats")
+def ml_stats(_: User = Depends(get_current_user)):
+    """Return model training metadata: accuracy, sample count, feature importance."""
+    from ..ai.ml_model import BTCDirectionModel
+    meta = BTCDirectionModel.get_meta()
+    if not meta:
+        return {
+            "trained": False,
+            "message": "Model not yet trained — using heuristic fallback. "
+                       "Call POST /api/ml/retrain to start training.",
+        }
+    return {"trained": True, **meta}
+
+
+@router.post("/ml/retrain")
+def ml_retrain(key: str = Query(...)):
+    """Queue a model retraining job (admin key required).
+
+    POST /api/ml/retrain?key=btc-oracle-demo-2026
+    The Celery worker fetches 1500 1-min klines and retrains XGBoost.
+    Results appear in /api/ml/stats once done (usually < 60 s).
+    """
+    if key != "btc-oracle-demo-2026":
+        raise HTTPException(status_code=403, detail="Invalid key")
+    from ..workers.tasks import retrain_model
+    task = retrain_model.delay()
+    return {"queued": True, "task_id": str(task.id),
+            "note": "Poll GET /api/ml/stats for results in ~30–60 s"}
+
+
 # ── Admin / diagnostics ─────────────────────────────────────────────
 
 @router.post("/admin/run-prediction")

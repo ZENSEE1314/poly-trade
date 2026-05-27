@@ -55,6 +55,8 @@ export const api = {
   myStats: () => req<any>("/api/stats/mine"),
   manualTrade: (side: "up" | "down", stake: number) =>
     req<any>("/api/trades/manual", { method: "POST", body: JSON.stringify({ side, stake }) }),
+  mlStats:     () => req<any>("/api/ml/stats"),
+  mlRetrain:   () => req<any>("/api/ml/retrain?key=btc-oracle-demo-2026", { method: "POST" }),
 };
 
 export function setToken(t: string) { localStorage.setItem("token", t); }

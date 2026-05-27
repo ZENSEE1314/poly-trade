@@ -39,5 +39,10 @@ celery_app.conf.update(
             "task": "app.workers.tasks.paper_demo_tick",
             "schedule": 300.0,
         },
+        # Retrain XGBoost every 6 hours on fresh Binance klines
+        "retrain-model": {
+            "task": "app.workers.tasks.retrain_model",
+            "schedule": 21600.0,   # 6 hours
+        },
     },
 )
