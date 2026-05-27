@@ -508,18 +508,18 @@ async def admin_seed_history(
 
     PERSONAS = ["TapeReader", "Contrarian", "MicroQuant", "MacroBias", "SentimentBot"]
 
-    def _predict(feats, ml_p=0.5):
-        lo = _logit(ml_p)
+    def _predict(feats):
+        # ML proxy computed first — used as logit starting point (matches backtest_10k.py)
+        r5   = feats.get("ret_5m", 0)
+        rsi  = feats.get("rsi_14", 50)
+        ml_p = min(max(0.5 + 2.5*r5 + 0.003*(rsi-50), 0.1), 0.9)
+        lo   = _logit(ml_p)
         for p in PERSONAS:
             vote, conf = _heuristic_vote(p, feats)
             if   vote == "up":   lo += 1.2 * conf
             elif vote == "down": lo -= 1.2 * conf
         swarm_p = _sigmoid(0.6 * lo)
-        # ml proxy: momentum + RSI
-        r5  = feats.get("ret_5m", 0)
-        rsi = feats.get("rsi_14", 50)
-        ml  = min(max(0.5 + 2.5*r5 + 0.003*(rsi-50), 0.1), 0.9)
-        return 0.55*ml + 0.45*swarm_p
+        return 0.55*ml_p + 0.45*swarm_p
 
     # ── 4. Wipe existing trades if requested ──────────────────────────────
     if wipe_existing:
