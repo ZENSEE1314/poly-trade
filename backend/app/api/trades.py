@@ -11,17 +11,23 @@ from ..models import Prediction, Trade, User
 from .deps import get_current_user
 
 
-def _sim_ask(p_side: float) -> float:
+def _sim_ask(p_up: float, side: str) -> float:
     """Simulate a realistic paper-trade fill price.
 
-    Instead of using the real Polymarket ask (which is often at extremes like
-    0.99 or 1.0, leaving zero profit), we simulate a market that *partially*
-    agrees with the model — typical of real markets before a move resolves.
+    Mirrors the market price formula from backtest_10k.py: the market is
+    slightly LESS confident than the model (less informed), so buys at a
+    lower price and wins pay more.
 
-    Result: market price 0.40–0.82, giving meaningful upside on wins.
+    side="up"  → market_price = 0.50 + 0.15*conf + noise  (>0.50, market leans up)
+    side="down" → market_price = 0.50 - 0.15*conf + noise  (<0.50, market leans down)
+
+    At conf=0.30, "down" price ≈ 0.455 → win pays +$118 per $100 stake.
+    Breakeven with this structure: ~46% win rate.
     """
-    raw = 0.50 + (p_side - 0.50) * 0.40 + random.gauss(0, 0.03)
-    return round(max(0.40, min(0.82, raw)), 3)
+    conf = abs(p_up - 0.5) * 2          # 0..1, higher = more confident
+    direction = 0.15 if side == "up" else -0.15
+    raw = 0.50 + direction * conf + random.gauss(0, 0.03)
+    return round(max(0.35, min(0.90, raw)), 3)
 
 router = APIRouter(prefix="/api", tags=["trades"])
 
@@ -235,10 +241,9 @@ async def admin_force_paper_trade(
     fc = await forecast_for_window(next_window_ts())
 
     side = "up" if fc.p_up >= 0.5 else "down"
-    p_side = fc.p_up if side == "up" else (1 - fc.p_up)
     token_id = market.up_token_id if side == "up" else market.down_token_id
     # Use simulated price so paper wins yield real upside (not 0 from a 0.99 ask)
-    sim_price = _sim_ask(p_side)
+    sim_price = _sim_ask(fc.p_up, side)
 
     req = OrderRequest(token_id=token_id, side="BUY", price=sim_price, size=stake)
     result = await paper_submit(req, sim_price)
@@ -305,7 +310,6 @@ async def admin_bulk_paper_trades(
 
     fc = await forecast_for_window(next_window_ts())
     side = "up" if fc.p_up >= 0.5 else "down"
-    p_side = fc.p_up if side == "up" else (1 - fc.p_up)
     token_id = market.up_token_id if side == "up" else market.down_token_id
 
     placed = []
@@ -314,7 +318,7 @@ async def admin_bulk_paper_trades(
         from ..models import Trade as TradeModel
         for i in range(count):
             # Each trade gets its own simulated price (adds realistic variance)
-            sim_price = _sim_ask(p_side)
+            sim_price = _sim_ask(fc.p_up, side)
             req = OrderRequest(token_id=token_id, side="BUY", price=sim_price, size=stake)
             result = await paper_submit(req, sim_price)
             trade = TradeModel(
@@ -538,9 +542,8 @@ async def admin_seed_history(
         side   = "up" if p_up > 0.5 else "down"
         p_side = p_up if side == "up" else (1 - p_up)
 
-        # Simulate market price: partially informed market + noise
-        sim_price = 0.5 + (p_side - 0.5) * 0.40 + random.gauss(0, 0.03)
-        sim_price = round(max(0.40, min(0.82, sim_price)), 3)
+        # Simulate market price using backtest_10k.py formula (less-informed market)
+        sim_price = _sim_ask(p_up, side)
 
         tokens  = stake / sim_price
         went_up = float(nrow["close"]) > float(row["close"])
