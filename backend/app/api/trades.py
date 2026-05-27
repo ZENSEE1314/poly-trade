@@ -104,6 +104,12 @@ async def admin_run_prediction(
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": str(e), "trace": traceback.format_exc()})
 
+    import json as _json
+    import redis as _redis
+    from ..core.config import get_settings as _cfg
+    _r = _redis.from_url(_cfg().REDIS_URL, decode_responses=True)
+    _r.setex(f"btc_oracle:pred:{ws}", 600, _json.dumps(fc.to_dict()))
+
     pred = Prediction(
         window_ts=ws,
         p_up=fc.p_up,
@@ -133,8 +139,10 @@ async def admin_run_trade_tick(_: User = Depends(get_current_user)):
     r = redis_lib.from_url(cfg.REDIS_URL, decode_responses=True)
     ws = current_window_ts()
 
-    # Try the cached forecast for either this window or next
-    cached = r.get(f"btc_oracle:pred:{ws + 300}") or r.get(f"btc_oracle:pred:{ws}")
+    # Try the cached forecast for next window, current window, or next-next window
+    cached = (r.get(f"btc_oracle:pred:{ws + 300}")
+              or r.get(f"btc_oracle:pred:{ws}")
+              or r.get(f"btc_oracle:pred:{ws + 600}"))
     if not cached:
         raise HTTPException(status_code=404, detail="No forecast in Redis cache. Run /admin/run-prediction first.")
 
