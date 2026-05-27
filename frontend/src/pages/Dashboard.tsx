@@ -7,6 +7,13 @@ import { useStream } from "../lib/useStream";
 
 type BotFeedEntry  = { side: string; window_ts: number; count: number };
 type TradeMsg      = { ok: boolean; text: string };
+type BtcTicker     = { price: number; change_pct: number; high_24h: number; low_24h: number };
+type PolyMarket    = {
+  found: boolean; window_ts: number; btc_price: number | null;
+  up_ask?: number; down_ask?: number;
+  up_payout_per_100?: number; down_payout_per_100?: number;
+  message?: string;
+};
 type MlMeta        = {
   trained: boolean;
   val_accuracy?: number;
@@ -45,18 +52,31 @@ export default function Dashboard() {
   const [botFeed, setBotFeed] = useState<BotFeedEntry[]>([]);
 
   // ML model self-learning stats
-  const [mlMeta, setMlMeta]       = useState<MlMeta | null>(null);
-  const [retraining, setRetraining] = useState(false);
-  const [retrainMsg, setRetrainMsg] = useState<string | null>(null);
+  const [mlMeta, setMlMeta]         = useState<MlMeta | null>(null);
+  const [retraining, setRetraining]   = useState(false);
+  const [retrainMsg, setRetrainMsg]   = useState<string | null>(null);
+
+  // Live BTC price (polled every 15 s)
+  const [ticker, setTicker]         = useState<BtcTicker | null>(null);
+  // Polymarket current market odds (polled every 30 s)
+  const [polyMkt, setPolyMkt]       = useState<PolyMarket | null>(null);
+  // User's profile (to know if live trading is on)
+  const [profile, setProfile]       = useState<any | null>(null);
+  const [wallet, setWallet]         = useState<any | null>(null);
 
   // ── Data loading ──────────────────────────────────────────────────
 
   const loadAll = useCallback(async () => {
     try {
-      const [p, s, ml] = await Promise.all([api.predictions(), api.myStats(), api.mlStats()]);
+      const [p, s, ml, prof, wal] = await Promise.all([
+        api.predictions(), api.myStats(), api.mlStats(),
+        api.getProfile(), api.me.wallet(),
+      ]);
       setPreds(p.reverse());
       setStats(s);
       setMlMeta(ml);
+      setProfile(prof);
+      setWallet(wal);
       setLastUpdate(new Date());
     } catch {}
   }, []);
@@ -67,6 +87,24 @@ export default function Dashboard() {
 
   useEffect(() => {
     const id = setInterval(() => setSecondsLeft(windowCountdown()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // ── Live BTC price poll (every 15 s) ─────────────────────────────
+
+  useEffect(() => {
+    const fetch = () => api.btcPrice().then(setTicker).catch(() => {});
+    fetch();
+    const id = setInterval(fetch, 15_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // ── Polymarket odds poll (every 30 s) ─────────────────────────────
+
+  useEffect(() => {
+    const fetch = () => api.currentMarket().then(setPolyMkt).catch(() => {});
+    fetch();
+    const id = setInterval(fetch, 30_000);
     return () => clearInterval(id);
   }, []);
 
@@ -144,10 +182,12 @@ export default function Dashboard() {
 
   // ── Derived values ────────────────────────────────────────────────
 
-  const latest = preds[preds.length - 1];
-  const mm = String(Math.floor(secondsLeft / 60)).padStart(2, "0");
-  const ss = String(secondsLeft % 60).padStart(2, "0");
+  const latest      = preds[preds.length - 1];
+  const mm          = String(Math.floor(secondsLeft / 60)).padStart(2, "0");
+  const ss          = String(secondsLeft % 60).padStart(2, "0");
   const windowUrgent = secondsLeft < 30;
+  const isLive      = profile && !profile.paper_only && wallet?.mode === "private_key";
+  const walletLinked = !!wallet;
 
   // ── Render ────────────────────────────────────────────────────────
 
@@ -162,17 +202,69 @@ export default function Dashboard() {
         <LiveDot />
       </div>
 
-      {/* ── Forecast tiles ── */}
-      {latest ? (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 }}>
-          <Tile label="BTC spot"       value={`$${Number(latest.btc_price).toFixed(2)}`} />
-          <Tile label="Next window P(Up)" value={pct(latest.p_up)}
-                accent={latest.p_up > 0.55 ? "#3fb950" : latest.p_up < 0.45 ? "#ff6b6b" : "#9aa6b2"} />
-          <Tile label="ML model"       value={pct(latest.ml_p_up)} />
-          <Tile label="LLM swarm"      value={pct(latest.swarm_p_up)} />
+      {/* ── Live BTC price + forecast tiles ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 }}>
+        {/* BTC price — live-polled every 15 s */}
+        {ticker ? (
+          <div style={{ background: "#0d131c", border: "1px solid #1d2735", borderRadius: 10, padding: 16 }}>
+            <div style={{ color: "#9aa6b2", fontSize: 12 }}>BTC / USD</div>
+            <div style={{ marginTop: 4, fontSize: 22, fontWeight: 700, color: "#e6edf3" }}>
+              ${ticker.price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+            <div style={{ marginTop: 2, fontSize: 12,
+                          color: ticker.change_pct >= 0 ? "#3fb950" : "#ff6b6b" }}>
+              {ticker.change_pct >= 0 ? "+" : ""}{ticker.change_pct.toFixed(2)}% 24 h
+            </div>
+          </div>
+        ) : (
+          <Tile label="BTC / USD" value={latest ? `$${Number(latest.btc_price).toFixed(2)}` : "…"} />
+        )}
+        {latest ? (
+          <>
+            <Tile label="Next window P(Up)" value={pct(latest.p_up)}
+                  accent={latest.p_up > 0.55 ? "#3fb950" : latest.p_up < 0.45 ? "#ff6b6b" : "#9aa6b2"} />
+            <Tile label="ML model"    value={pct(latest.ml_p_up)} />
+            <Tile label="LLM swarm"   value={pct(latest.swarm_p_up)} />
+          </>
+        ) : (
+          <>
+            <Tile label="Next window P(Up)" value="…" />
+            <Tile label="ML model"    value="…" />
+            <Tile label="LLM swarm"   value="…" />
+          </>
+        )}
+      </div>
+      {!latest && <p style={{ color: "#9aa6b2", marginTop: 12 }}>Waiting for first forecast (≤60 s)…</p>}
+
+      {/* ── Polymarket live odds ── */}
+      {polyMkt?.found && (
+        <div style={{ ...card(14), display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 0 }}>
+          <div style={{ padding: "12px 16px", borderRight: "1px solid #1d2735" }}>
+            <div style={{ color: "#9aa6b2", fontSize: 11, marginBottom: 4 }}>PRICE TO BEAT</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: "#e6edf3" }}>
+              ${polyMkt.btc_price?.toLocaleString("en-US", { maximumFractionDigits: 0 }) ?? "—"}
+            </div>
+            <div style={{ fontSize: 11, color: "#555", marginTop: 2 }}>current BTC spot</div>
+          </div>
+          <div style={{ padding: "12px 16px", borderRight: "1px solid #1d2735" }}>
+            <div style={{ color: "#3fb950", fontSize: 11, marginBottom: 4 }}>↑ UP ODDS</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: "#3fb950" }}>
+              {((polyMkt.up_ask ?? 0.5) * 100).toFixed(1)}¢
+            </div>
+            <div style={{ fontSize: 11, color: "#555", marginTop: 2 }}>
+              $100 wins +${polyMkt.up_payout_per_100?.toFixed(0)}
+            </div>
+          </div>
+          <div style={{ padding: "12px 16px" }}>
+            <div style={{ color: "#ff6b6b", fontSize: 11, marginBottom: 4 }}>↓ DOWN ODDS</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: "#ff6b6b" }}>
+              {((polyMkt.down_ask ?? 0.5) * 100).toFixed(1)}¢
+            </div>
+            <div style={{ fontSize: 11, color: "#555", marginTop: 2 }}>
+              $100 wins +${polyMkt.down_payout_per_100?.toFixed(0)}
+            </div>
+          </div>
         </div>
-      ) : (
-        <p style={{ color: "#9aa6b2" }}>Waiting for first forecast (≤60 s)…</p>
       )}
 
       {/* ── Swarm votes (live — updated every cycle via SSE) ── */}
@@ -204,23 +296,56 @@ export default function Dashboard() {
 
       {/* ── Manual trade panel ── */}
       <div style={card(18)}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-          <h3 style={{ margin: 0 }}>Trade This Window</h3>
+        {/* Header row */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <h3 style={{ margin: 0 }}>Trade This Window</h3>
+            {isLive ? (
+              <span style={{
+                background: "#ff4d4d18", border: "1px solid #ff4d4d55",
+                borderRadius: 5, padding: "2px 8px", fontSize: 11, fontWeight: 700, color: "#ff6b6b",
+              }}>🔴 LIVE</span>
+            ) : (
+              <span style={{
+                background: "#388bfd18", border: "1px solid #388bfd44",
+                borderRadius: 5, padding: "2px 8px", fontSize: 11, fontWeight: 600, color: "#388bfd",
+              }}>PAPER</span>
+            )}
+          </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ color: "#9aa6b2", fontSize: 12 }}>closes in</span>
             <span style={{
-              fontFamily: "monospace",
-              fontSize: 20,
-              fontWeight: 700,
-              color: windowUrgent ? "#ff6b6b" : "#e6edf3",
-              minWidth: 52,
-              textAlign: "right",
+              fontFamily: "monospace", fontSize: 20, fontWeight: 700,
+              color: windowUrgent ? "#ff6b6b" : "#e6edf3", minWidth: 52, textAlign: "right",
             }}>
               {mm}:{ss}
             </span>
           </div>
         </div>
 
+        {/* Live → paper setup nudge */}
+        {!walletLinked && (
+          <div style={{
+            marginBottom: 14, padding: "9px 12px", borderRadius: 7,
+            background: "#e3b34118", border: "1px solid #e3b34133", fontSize: 12, color: "#e3b341",
+          }}>
+            ⚡ Go live: <a href="/wallet" style={{ color: "#388bfd", fontWeight: 600 }}>
+              Link your Polymarket wallet
+            </a> → turn off Paper Only in Settings.
+          </div>
+        )}
+        {walletLinked && !isLive && (
+          <div style={{
+            marginBottom: 14, padding: "9px 12px", borderRadius: 7,
+            background: "#388bfd18", border: "1px solid #388bfd33", fontSize: 12, color: "#9aa6b2",
+          }}>
+            Wallet connected. <a href="/settings" style={{ color: "#388bfd", fontWeight: 600 }}>
+              Disable Paper Only in Settings
+            </a> to place real Polymarket trades.
+          </div>
+        )}
+
+        {/* Stake row */}
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
           <label style={{ color: "#9aa6b2", fontSize: 13, whiteSpace: "nowrap" }}>Stake (USDC)</label>
           <input
@@ -231,77 +356,78 @@ export default function Dashboard() {
             step={10}
             onChange={e => setStake(Math.max(1, Math.min(10000, Number(e.target.value))))}
             style={{
-              background: "#141c26",
-              border: "1px solid #1d2735",
-              borderRadius: 8,
-              color: "#e6edf3",
-              padding: "7px 12px",
-              fontSize: 15,
-              width: 110,
-              outline: "none",
+              background: "#141c26", border: "1px solid #1d2735", borderRadius: 8,
+              color: "#e6edf3", padding: "7px 12px", fontSize: 15, width: 110, outline: "none",
             }}
           />
           {latest && (
             <span style={{ color: "#555", fontSize: 12 }}>
-              {latest.p_up > 0.55
-                ? "→ model leans UP"
-                : latest.p_up < 0.45
-                  ? "→ model leans DOWN"
-                  : "→ model is neutral"}
+              {latest.p_up > 0.55 ? "→ model leans UP" :
+               latest.p_up < 0.45 ? "→ model leans DOWN" : "→ model is neutral"}
             </span>
           )}
         </div>
 
+        {/* UP / DOWN buttons */}
         <div style={{ display: "flex", gap: 12 }}>
           <button
             onClick={() => placeTrade("up")}
             disabled={!!placing}
             style={{
-              flex: 1,
-              padding: "14px 0",
+              flex: 1, padding: "14px 0",
               background: placing === "up" ? "#3fb95033" : "#3fb95018",
-              border: "1px solid #3fb950",
-              borderRadius: 10,
-              color: "#3fb950",
-              fontSize: 16,
-              fontWeight: 700,
+              border: `1px solid ${isLive ? "#ff4d4d" : "#3fb950"}`,
+              borderRadius: 10, color: "#3fb950",
+              fontSize: 16, fontWeight: 700,
               cursor: placing ? "not-allowed" : "pointer",
               opacity: placing === "down" ? 0.4 : 1,
               transition: "opacity 0.15s, background 0.15s",
             }}
           >
-            {placing === "up" ? "Placing…" : "↑  BUY UP"}
+            {placing === "up" ? "Placing…" : (
+              <span>
+                ↑ {isLive ? "BUY UP (LIVE)" : "BUY UP"}
+                {polyMkt?.found && polyMkt.up_ask != null && (
+                  <div style={{ fontSize: 11, fontWeight: 400, marginTop: 3, color: "#3fb95099" }}>
+                    ask {(polyMkt.up_ask * 100).toFixed(1)}¢ · win +${(stake / polyMkt.up_ask - stake).toFixed(0)}
+                  </div>
+                )}
+              </span>
+            )}
           </button>
           <button
             onClick={() => placeTrade("down")}
             disabled={!!placing}
             style={{
-              flex: 1,
-              padding: "14px 0",
+              flex: 1, padding: "14px 0",
               background: placing === "down" ? "#ff6b6b33" : "#ff6b6b18",
-              border: "1px solid #ff6b6b",
-              borderRadius: 10,
-              color: "#ff6b6b",
-              fontSize: 16,
-              fontWeight: 700,
+              border: `1px solid ${isLive ? "#ff4d4d" : "#ff6b6b"}`,
+              borderRadius: 10, color: "#ff6b6b",
+              fontSize: 16, fontWeight: 700,
               cursor: placing ? "not-allowed" : "pointer",
               opacity: placing === "up" ? 0.4 : 1,
               transition: "opacity 0.15s, background 0.15s",
             }}
           >
-            {placing === "down" ? "Placing…" : "↓  BUY DOWN"}
+            {placing === "down" ? "Placing…" : (
+              <span>
+                ↓ {isLive ? "BUY DOWN (LIVE)" : "BUY DOWN"}
+                {polyMkt?.found && polyMkt.down_ask != null && (
+                  <div style={{ fontSize: 11, fontWeight: 400, marginTop: 3, color: "#ff6b6b99" }}>
+                    ask {(polyMkt.down_ask * 100).toFixed(1)}¢ · win +${(stake / polyMkt.down_ask - stake).toFixed(0)}
+                  </div>
+                )}
+              </span>
+            )}
           </button>
         </div>
 
         {tradeMsg && (
           <div style={{
-            marginTop: 12,
-            padding: "9px 14px",
-            borderRadius: 8,
+            marginTop: 12, padding: "9px 14px", borderRadius: 8,
             background: tradeMsg.ok ? "#3fb95018" : "#ff6b6b18",
             border: `1px solid ${tradeMsg.ok ? "#3fb95044" : "#ff6b6b44"}`,
-            color: tradeMsg.ok ? "#3fb950" : "#ff6b6b",
-            fontSize: 13,
+            color: tradeMsg.ok ? "#3fb950" : "#ff6b6b", fontSize: 13,
           }}>
             {tradeMsg.ok ? "✓ " : "✗ "}{tradeMsg.text}
           </div>

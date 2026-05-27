@@ -187,28 +187,80 @@ async def manual_trade(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Place a manual paper trade for the current 5-min window.
+    """Place a manual trade for the current 5-min window.
 
-    Uses the same simulated fill price and reconciler flow as bot trades.
-    The outcome (won/lost) is determined by real BTC klines after the window closes.
+    Routes to live Polymarket execution when:
+      - profile.paper_only = False
+      - user has a wallet with mode='private_key'
+    Otherwise places a paper trade resolved by the Celery reconciler.
     """
     if body.side not in ("up", "down"):
         raise HTTPException(status_code=400, detail="side must be 'up' or 'down'")
     if body.stake < 1 or body.stake > 10_000:
         raise HTTPException(status_code=400, detail="stake must be $1–$10,000")
 
-    from ..services.polymarket import current_window_ts
+    from ..services.polymarket import (
+        PolymarketClient, OrderRequest as PolyReq,
+        current_window_ts, live_submit, paper_submit,
+    )
+    from ..core.kms import SealedSecret, vault
     import redis as _redis
 
     ws = current_window_ts()
+    profile = user.profile
 
-    # Get latest p_up from Redis so the sim price is calibrated correctly
+    # Determine whether to execute live or paper
+    use_real = (
+        profile is not None
+        and not profile.paper_only
+        and user.wallet is not None
+        and user.wallet.mode == "private_key"
+    )
+
     _r_sync = _redis.from_url(_settings.REDIS_URL, decode_responses=True)
     cached = _r_sync.get(f"btc_oracle:pred:{ws + 300}") or _r_sync.get(f"btc_oracle:pred:{ws}")
     p_up = json.loads(cached)["p_up"] if cached else 0.5
 
-    sim_price = _sim_ask(p_up, body.side)
-    tokens = round(body.stake / sim_price, 6)
+    if use_real:
+        # Find live Polymarket market
+        poly = PolymarketClient()
+        market = await poly.find_btc_market(ws)
+        if not market:
+            raise HTTPException(status_code=503, detail=(
+                "No active Polymarket BTC-updown-5m market found for this window. "
+                "The market may not have opened yet — try again in a moment."
+            ))
+
+        ask = market.up_best_ask if body.side == "up" else market.down_best_ask
+        token_id = market.up_token_id if body.side == "up" else market.down_token_id
+
+        try:
+            secret_bytes = vault.open(
+                SealedSecret.from_dict(user.wallet.sealed),
+                aad=str(user.id).encode(),
+            )
+            pk = secret_bytes.decode()
+            req = PolyReq(token_id=token_id, side="BUY", price=ask, size=body.stake)
+            result = await live_submit(req, pk, user.wallet.funder)
+        except Exception as exc:
+            # Live order failed — fall back to paper so the user's intent is preserved
+            use_real = False
+            ask = _sim_ask(p_up, body.side)
+            req = PolyReq(token_id=token_id, side="BUY", price=ask, size=body.stake)
+            result = await paper_submit(req, ask)
+            result.raw["live_error"] = str(exc)
+    else:
+        sim_price = _sim_ask(p_up, body.side)
+        req = PolyReq(
+            token_id=f"paper-{body.side}",
+            side="BUY",
+            price=sim_price,
+            size=body.stake,
+        )
+        result = await paper_submit(req, sim_price)
+
+    avg_price = result.avg_price
+    tokens = round(body.stake / max(avg_price, 1e-6), 6)
 
     trade = Trade(
         user_id=user.id,
@@ -216,35 +268,120 @@ async def manual_trade(
         market_slug=f"btc-updown-5m-{ws}",
         side=body.side,
         stake_usdc=body.stake,
-        avg_price=sim_price,
+        avg_price=avg_price,
         tokens_filled=tokens,
-        is_paper=True,
-        status="filled",
+        is_paper=not use_real,
+        status="filled" if result.success else "error",
         pnl_usdc=0.0,
-        order_meta={"manual": True, "p_up": round(p_up, 4)},
+        order_meta={
+            "manual": True,
+            "live": use_real,
+            "p_up": round(p_up, 4),
+            "order_id": result.order_id,
+            **(result.raw or {}),
+        },
     )
     db.add(trade)
     db.commit()
     db.refresh(trade)
 
-    # Notify dashboard via SSE so History updates immediately
     _r_sync.publish(SSE_CHANNEL, json.dumps({
         "type": "trade",
         "window_ts": ws,
         "side": body.side,
         "manual": True,
+        "live": use_real,
         "count": 1,
     }))
 
     return {
-        "trade_id": trade.id,
-        "window_ts": ws,
-        "side": body.side,
-        "stake_usdc": body.stake,
-        "avg_price": sim_price,
+        "trade_id":     trade.id,
+        "window_ts":    ws,
+        "side":         body.side,
+        "stake_usdc":   body.stake,
+        "avg_price":    avg_price,
         "tokens_filled": tokens,
-        "status": "filled",
-        "note": "Outcome resolved by Celery reconciler after the window closes.",
+        "is_paper":     not use_real,
+        "status":       trade.status,
+        "order_id":     result.order_id,
+        "note": (
+            "Live order submitted to Polymarket."
+            if use_real else
+            "Paper trade — outcome resolved by reconciler after window closes."
+        ),
+    }
+
+
+# ── Live BTC price ───────────────────────────────────────────────────
+
+@router.get("/btc/price")
+async def btc_price(_: User = Depends(get_current_user)):
+    """Lightweight real-time BTC spot price from Binance. Polled every 15 s by the dashboard."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get("https://api.binance.com/api/v3/ticker/24hr",
+                            params={"symbol": "BTCUSDT"})
+            d = r.json()
+            return {
+                "price":       float(d["lastPrice"]),
+                "change_pct":  float(d["priceChangePercent"]),
+                "high_24h":    float(d["highPrice"]),
+                "low_24h":     float(d["lowPrice"]),
+                "volume_24h":  float(d["quoteVolume"]),
+            }
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Price fetch failed: {exc}")
+
+
+# ── Current Polymarket market ─────────────────────────────────────────
+
+@router.get("/market/current")
+async def current_market(_: User = Depends(get_current_user)):
+    """Return the active Polymarket BTC Up/Down 5-min market for the current window.
+
+    Returns UP/DOWN best ask prices, potential payout, and the price-to-beat
+    (current BTC spot price that determines the outcome).
+    """
+    from ..services.polymarket import PolymarketClient, current_window_ts
+    from ..ai.market_data import fetch_klines
+
+    ws = current_window_ts()
+    poly = PolymarketClient()
+    market = await poly.find_btc_market(ws)
+
+    # Current BTC price from Binance for "price to beat"
+    try:
+        klines = await fetch_klines("1m", 5)
+        btc_now = float(klines["close"].iloc[-1])
+    except Exception:
+        btc_now = None
+
+    if not market:
+        return {
+            "found": False,
+            "window_ts": ws,
+            "btc_price": btc_now,
+            "message": "No active market for this window yet — usually opens a minute before start.",
+        }
+
+    # Payout per $100 stake (approximate, before fees)
+    up_payout   = round(100 / max(market.up_best_ask, 0.01) - 100, 2)
+    down_payout = round(100 / max(market.down_best_ask, 0.01) - 100, 2)
+    window_closes_in = (ws + 300) - int(__import__("time").time())
+
+    return {
+        "found":            True,
+        "window_ts":        ws,
+        "slug":             market.slug,
+        "btc_price":        btc_now,
+        "up_ask":           market.up_best_ask,
+        "down_ask":         market.down_best_ask,
+        "up_bid":           market.up_best_bid,
+        "down_bid":         market.down_best_bid,
+        "up_payout_per_100":   up_payout,
+        "down_payout_per_100": down_payout,
+        "window_closes_in": max(0, window_closes_in),
     }
 
 
