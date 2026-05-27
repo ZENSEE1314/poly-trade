@@ -19,22 +19,12 @@ export default function History() {
     setDevLoading("inject");
     try {
       const t = await api.adminInjectTrade();
-      setDevLoading("reconcile");
-      const r = await api.adminReconcile();
-      const resolved = r.resolved ?? [];
-      const skipped = r.skipped ?? [];
-      if (resolved.length > 0) {
-        setDevMsg(`✓ Resolved ${resolved.length} trade(s): ${resolved.map((x: any) => `#${x.trade_id} → ${x.status} (pnl $${x.pnl_usdc})`).join(", ")}`);
-      } else if (skipped.length > 0) {
-        setDevMsg(`Trade injected (id ${t.trade_id}) but reconcile skipped: ${skipped[0]?.reason}`);
-      } else if (r.message) {
-        setDevMsg(r.message);
-      }
-      loadTrades();
+      setDevMsg(`✓ Trade #${t.trade_id} → ${t.status} (pnl $${t.pnl_usdc}) [prices via ${t.price_source}]`);
     } catch (e: any) {
       setDevMsg("Error: " + (e.message ?? String(e)));
     } finally {
       setDevLoading("");
+      loadTrades();  // always refresh, even on error
     }
   }
 

@@ -123,37 +123,79 @@ async def admin_inject_test_trade(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Create a paper trade for the most-recently-closed 5-min window.
-    Bypasses prediction, decide(), and Polymarket entirely — use this to
-    verify the reconcile flow works before worrying about edge/confidence."""
+    """Create a fully-resolved paper trade without any external dependencies.
+
+    Tries to fetch real BTC prices from Binance to determine won/lost.
+    Falls back to a simulated outcome if Binance is unreachable.
+    No Celery, no Redis, no Polymarket required.
+    """
     import time
+    import pandas as pd
+    from datetime import datetime, timezone
     from ..services.polymarket import WINDOW_SECS
+    from ..ai.market_data import fetch_klines
 
     now = int(time.time())
-    # Two full windows back guarantees close_ts is always > 30s in the past,
-    # regardless of where we are in the current window.
-    ws = (now - (now % WINDOW_SECS)) - 2 * WINDOW_SECS
+    ws = (now - (now % WINDOW_SECS)) - 2 * WINDOW_SECS  # always at least 10 min ago
+    close_ts = ws + WINDOW_SECS
+    stake = 1.0
+    avg_price = 0.50
+    tokens_filled = stake / avg_price  # 2.0 tokens
+
+    # Try to get real BTC prices; fall back to a deterministic simulated outcome
+    open_p: float | None = None
+    close_p: float | None = None
+    price_source = "simulated"
+    try:
+        klines = await fetch_klines("1m", 1440)
+        epoch = pd.Timestamp("1970-01-01", tz="UTC")
+        df_ts = ((klines["open_time"] - epoch) / pd.Timedelta("1s")).astype("int64").values
+        oi = next((i for i, v in enumerate(df_ts) if v >= ws), None)
+        ci_raw = next((i for i, v in enumerate(df_ts) if v >= close_ts), None)
+        if oi is not None and ci_raw is not None and ci_raw > 0:
+            open_p = float(klines["open"].iloc[oi])
+            close_p = float(klines["close"].iloc[ci_raw - 1])
+            price_source = "binance"
+    except Exception:
+        pass  # Binance unreachable — use simulated result below
+
+    if open_p is None or close_p is None:
+        # Deterministic simulation: alternate won/lost based on minute parity
+        went_up = (ws // 60) % 2 == 0
+        open_p = 100_000.0
+        close_p = 100_100.0 if went_up else 99_900.0
+        price_source = "simulated"
+
+    went_up = close_p > open_p
+    side = "up"  # we always bet up in test trades
+    won = (side == "up" and went_up) or (side == "down" and not went_up)
+    status = "won" if won else "lost"
+    pnl = round(tokens_filled - stake, 4) if won else round(-stake, 4)
 
     trade = Trade(
         user_id=user.id,
         window_ts=ws,
         market_slug=f"bitcoin-up-or-down-{ws}",
-        side="up",
-        stake_usdc=1.0,
-        avg_price=0.50,
-        tokens_filled=2.0,   # 1 USDC / 0.50 = 2 tokens
+        side=side,
+        stake_usdc=stake,
+        avg_price=avg_price,
+        tokens_filled=tokens_filled,
         is_paper=True,
-        status="filled",
-        order_meta={"paper": True, "injected": True},
+        status=status,
+        pnl_usdc=pnl,
+        resolved_at=datetime.now(timezone.utc),
+        order_meta={"paper": True, "injected": True, "price_source": price_source},
     )
     db.add(trade)
     db.commit()
     db.refresh(trade)
     return {
         "trade_id": trade.id,
-        "window_ts": ws,
-        "window_closed_at": ws + WINDOW_SECS,
-        "message": "Test trade injected — call POST /api/admin/run-reconcile to resolve it.",
+        "status": status,
+        "pnl_usdc": pnl,
+        "open_price": open_p,
+        "close_price": close_p,
+        "price_source": price_source,
     }
 
 
