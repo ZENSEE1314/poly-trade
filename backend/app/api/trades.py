@@ -358,16 +358,19 @@ async def admin_seed_history(
     stake: float = 100.0,
     min_confidence: float = 0.06,
     wipe_existing: bool = False,
+    use_synthetic: bool = False,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Replay the heuristic model on real Kraken 5-min candles and write
-    historical trades with actual BTC outcomes to the DB.
+    """Replay the heuristic model on 5-min BTC candles and write historical
+    trades with actual outcomes to the DB.
 
-    ?candles=600   — how many 5-min candles to load (~2 days)
-    ?stake=100     — USDC stake per trade
-    ?min_confidence=0.06  — only trade when |p_up-0.5|*2 > this
-    ?wipe_existing=true   — delete ALL existing trades for this user first
+    ?candles=1000       — candles to process (Kraken max ~700; synthetic unlimited)
+    ?stake=100          — USDC stake per trade
+    ?min_confidence=0.06 — only trade when |p_up-0.5|*2 > this
+    ?wipe_existing=true  — delete ALL existing trades for this user first
+    ?use_synthetic=true  — generate GBM synthetic data instead of fetching Kraken
+                           (more neutral, ~51% win rate, shows strategy potential)
     """
     import math
     import numpy as np
@@ -436,11 +439,15 @@ async def admin_seed_history(
             "low": lows, "close": closes, "volume": vols,
         })
 
-    raw = await _kraken(candles)
-    source = "kraken"
-    if raw is None or len(raw) < 100:
+    if use_synthetic:
         raw = _synthetic(candles)
         source = "synthetic"
+    else:
+        raw = await _kraken(candles)
+        source = "kraken"
+        if raw is None or len(raw) < 100:
+            raw = _synthetic(candles)
+            source = "synthetic"
 
     # ── 2. Feature engineering ────────────────────────────────────────────
     d = raw.copy()
