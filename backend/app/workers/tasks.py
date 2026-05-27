@@ -35,6 +35,10 @@ PRED_KEY = "btc_oracle:pred:{ws}"
 LOCK_KEY = "btc_oracle:lock:{ws}:{user_id}"
 SSE_CHANNEL = "btc_oracle:events"
 
+# Only trade when the model has at least this much conviction.
+# conf = abs(p_up - 0.5) * 2  →  0.30 means p_up < 0.35 or p_up > 0.65
+MIN_DEMO_CONFIDENCE = 0.30
+
 
 def _publish(event: dict) -> None:
     """Publish a JSON event to the SSE channel. Best-effort — never raises."""
@@ -99,9 +103,14 @@ def run_prediction_cycle() -> dict:
 def _place_demo_trades(ws: int, p_up: float) -> int:
     """Insert one simulated paper trade per user for the given window.
 
-    Called from run_prediction_cycle so it fires every 5-min window even if
-    the paper_demo_tick beat entry hasn't redeployed yet.
+    Only trades when model confidence exceeds MIN_DEMO_CONFIDENCE so we
+    never buy into a near-coin-flip.  Called from run_prediction_cycle.
     """
+    conf = abs(p_up - 0.5) * 2          # 0 = no edge, 1 = maximum conviction
+    if conf < MIN_DEMO_CONFIDENCE:
+        log.info("demo tick skipped: conf=%.2f < %.2f (p_up=%.3f)", conf, MIN_DEMO_CONFIDENCE, p_up)
+        return 0
+
     side = "up" if p_up >= 0.5 else "down"
     slug = f"btc-updown-5m-{ws}"
     placed = 0
@@ -294,6 +303,11 @@ def paper_demo_tick() -> dict:
         except Exception as exc:
             log.warning("paper_demo_tick: forecast failed: %s", exc)
             return {"ok": False, "error": str(exc)}
+
+    conf = abs(p_up - 0.5) * 2
+    if conf < MIN_DEMO_CONFIDENCE:
+        log.info("paper_demo_tick skipped: conf=%.2f < %.2f (p_up=%.3f)", conf, MIN_DEMO_CONFIDENCE, p_up)
+        return {"ok": True, "skipped": True, "reason": "low_confidence", "p_up": round(p_up, 4)}
 
     side = "up" if p_up >= 0.5 else "down"
     slug = f"btc-updown-5m-{ws}"

@@ -707,6 +707,17 @@ async def demo_tick(
         fc = await forecast_for_window(next_window_ts())
         p_up = fc.p_up
 
+    MIN_CONFIDENCE = 0.30           # only trade when |p_up-0.5|*2 > this
+    conf = abs(p_up - 0.5) * 2
+    if conf < MIN_CONFIDENCE:
+        return {
+            "window_ts": ws,
+            "p_up": round(p_up, 4),
+            "placed": 0,
+            "skipped": True,
+            "reason": f"confidence {conf:.2f} < {MIN_CONFIDENCE} — model has no edge, not trading",
+        }
+
     side = "up" if p_up >= 0.5 else "down"
     slug = f"btc-updown-5m-{ws}"
     POLY_FEE = 0.02
