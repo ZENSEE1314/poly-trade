@@ -1,17 +1,22 @@
+import asyncio
+import json
 import random
 import traceback
 from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, desc, and_
 from sqlalchemy.orm import Session
 
 from ..core.config import get_settings
 from ..db.session import get_db
 from ..models import Prediction, Trade, TradingProfile, User
-from .deps import get_current_user
+from .deps import get_current_user, get_current_user_sse
 
 _settings = get_settings()
+
+SSE_CHANNEL = "btc_oracle:events"
 
 
 def _sim_ask(p_up: float, side: str) -> float:
@@ -108,6 +113,65 @@ def my_stats(user: User = Depends(get_current_user), db: Session = Depends(get_d
         "win_rate": (wins / len(resolved)) if resolved else None,
         "pnl_usdc_7d": pnl,
     }
+
+
+# ── Real-time SSE stream ────────────────────────────────────────────
+
+@router.get("/stream")
+async def stream_events(user: User = Depends(get_current_user_sse)):
+    """Server-Sent Events endpoint.
+
+    The client opens one persistent connection; the server pushes JSON
+    events whenever a prediction, trade, or reconciliation occurs.
+
+    EventSource cannot send Authorization headers, so the JWT is passed
+    as ?token=<jwt> in the query string.
+
+    Nginx must have X-Accel-Buffering: no (set in response header below)
+    to prevent proxy buffering from swallowing events.
+    """
+    import redis.asyncio as aioredis
+
+    async def event_generator():
+        r = aioredis.from_url(_settings.REDIS_URL, decode_responses=True)
+        pubsub = r.pubsub()
+        await pubsub.subscribe(SSE_CHANNEL)
+        try:
+            # Initial handshake — lets the client know the stream is open
+            yield f"data: {json.dumps({'type': 'connected', 'user_id': user.id})}\n\n"
+
+            while True:
+                # get_message is non-blocking; wait up to 25s for a message
+                # then send a heartbeat comment (keeps nginx from closing idle conn)
+                try:
+                    msg = await asyncio.wait_for(
+                        pubsub.get_message(ignore_subscribe_messages=True),
+                        timeout=25.0,
+                    )
+                except asyncio.TimeoutError:
+                    msg = None
+
+                if msg and msg["type"] == "message":
+                    yield f"data: {msg['data']}\n\n"
+                else:
+                    # SSE comment — keeps the connection alive through proxies
+                    yield ": heartbeat\n\n"
+
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await pubsub.unsubscribe(SSE_CHANNEL)
+            await r.aclose()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # disable nginx proxy buffering
+            "Connection": "keep-alive",
+        },
+    )
 
 
 # ── Admin / diagnostics ─────────────────────────────────────────────

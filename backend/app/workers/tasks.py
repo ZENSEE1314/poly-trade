@@ -33,6 +33,15 @@ settings = get_settings()
 _r = redis.from_url(settings.REDIS_URL, decode_responses=True)
 PRED_KEY = "btc_oracle:pred:{ws}"
 LOCK_KEY = "btc_oracle:lock:{ws}:{user_id}"
+SSE_CHANNEL = "btc_oracle:events"
+
+
+def _publish(event: dict) -> None:
+    """Publish a JSON event to the SSE channel. Best-effort — never raises."""
+    try:
+        _r.publish(SSE_CHANNEL, json.dumps(event))
+    except Exception as exc:
+        log.debug("SSE publish failed: %s", exc)
 
 
 # ───────────────────────── Prediction loop ─────────────────────────
@@ -66,6 +75,14 @@ def run_prediction_cycle() -> dict:
         db.close()
 
     log.info("forecast window=%s p_up=%.3f btc=%.2f", ws, fc.p_up, fc.btc_price)
+    _publish({
+        "type": "prediction",
+        "window_ts": ws,
+        "p_up": round(fc.p_up, 4),
+        "ml_p_up": round(fc.ml_p_up, 4),
+        "swarm_p_up": round(fc.swarm_p_up, 4),
+        "btc_price": round(fc.btc_price, 2),
+    })
 
     # Piggyback: place a simulated paper trade once per 5-min window.
     # Using Redis lock so the 60s prediction loop only fires one trade per window.
@@ -121,6 +138,8 @@ def _place_demo_trades(ws: int, p_up: float) -> int:
             db.add(trade)
             placed += 1
         db.commit()
+        if placed:
+            _publish({"type": "trade", "window_ts": ws, "side": side, "count": placed})
         log.info("demo trades placed ws=%s side=%s p_up=%.3f count=%d", ws, side, p_up, placed)
     finally:
         db.close()
@@ -398,6 +417,8 @@ def reconcile_open_trades() -> dict:
             resolved += 1
 
         db.commit()
+        if resolved:
+            _publish({"type": "resolved", "count": resolved})
         log.info("reconcile: resolved %d trades", resolved)
     finally:
         db.close()
