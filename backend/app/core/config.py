@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     LIVE_TRADING: bool = False
     ALLOW_PK_MODE: bool = False
     GLOBAL_MAX_DAILY_USDC: float = 100.0
-    MIN_EDGE: float = 0.04
+    MIN_EDGE: float = 0.003  # 0.3% min edge — low enough for paper trading signals
 
 
 @lru_cache
