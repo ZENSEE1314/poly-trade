@@ -2,13 +2,16 @@ import random
 import traceback
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, desc, and_
 from sqlalchemy.orm import Session
 
+from ..core.config import get_settings
 from ..db.session import get_db
-from ..models import Prediction, Trade, User
+from ..models import Prediction, Trade, TradingProfile, User
 from .deps import get_current_user
+
+_settings = get_settings()
 
 
 def _sim_ask(p_up: float, side: str) -> float:

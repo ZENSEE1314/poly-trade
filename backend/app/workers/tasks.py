@@ -66,7 +66,63 @@ def run_prediction_cycle() -> dict:
         db.close()
 
     log.info("forecast window=%s p_up=%.3f btc=%.2f", ws, fc.p_up, fc.btc_price)
+
+    # Piggyback: place a simulated paper trade once per 5-min window.
+    # Using Redis lock so the 60s prediction loop only fires one trade per window.
+    trade_lock = f"btc_oracle:demo:{ws}"
+    if _r.set(trade_lock, "1", nx=True, ex=600):
+        try:
+            _place_demo_trades(ws, fc.p_up)
+        except Exception as exc:
+            log.warning("demo trade placement failed: %s", exc)
+
     return {"ok": True, "window_ts": ws, "p_up": fc.p_up}
+
+
+def _place_demo_trades(ws: int, p_up: float) -> int:
+    """Insert one simulated paper trade per user for the given window.
+
+    Called from run_prediction_cycle so it fires every 5-min window even if
+    the paper_demo_tick beat entry hasn't redeployed yet.
+    """
+    side = "up" if p_up >= 0.5 else "down"
+    slug = f"btc-updown-5m-{ws}"
+    placed = 0
+    db: Session = SessionLocal()
+    try:
+        users = db.execute(
+            select(User).join(TradingProfile, TradingProfile.user_id == User.id)
+        ).scalars().all()
+
+        for user in users:
+            per_user_lock = f"btc_oracle:demo:{ws}:{user.id}"
+            if not _r.set(per_user_lock, "1", nx=True, ex=600):
+                continue
+            profile = user.profile
+            if not profile:
+                continue
+            stake = min(float(getattr(profile, "max_stake_usdc", 100.0)), 100.0)
+            sim_price = _sim_ask(p_up, side)
+            tokens = round(stake / sim_price, 6)
+            trade = Trade(
+                user_id=user.id,
+                window_ts=ws,
+                market_slug=slug,
+                side=side,
+                stake_usdc=stake,
+                avg_price=sim_price,
+                tokens_filled=tokens,
+                is_paper=True,
+                status="filled",
+                order_meta={"demo": True, "p_up": round(p_up, 4)},
+            )
+            db.add(trade)
+            placed += 1
+        db.commit()
+        log.info("demo trades placed ws=%s side=%s p_up=%.3f count=%d", ws, side, p_up, placed)
+    finally:
+        db.close()
+    return placed
 
 
 # ───────────────────────── Trade loop ─────────────────────────
@@ -221,10 +277,10 @@ def paper_demo_tick() -> dict:
     placed = 0
     db: Session = SessionLocal()
     try:
+        # NOTE: paper_demo_tick runs for ALL users with a profile — it is a
+        # demo/simulation task that bypasses auto_trade_enabled intentionally.
         users_with_profile = db.execute(
-            select(User)
-            .join(TradingProfile, TradingProfile.user_id == User.id)
-            .where(TradingProfile.auto_trade_enabled == True)
+            select(User).join(TradingProfile, TradingProfile.user_id == User.id)
         ).scalars().all()
 
         for user in users_with_profile:
