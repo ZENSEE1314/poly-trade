@@ -87,36 +87,71 @@ class Vote:
 # ───────────────────────── deterministic fallback ─────────────────────────
 
 def _heuristic_vote(persona: str, feats: dict) -> Vote:
-    """Mirror each persona's style with simple rules — used when no LLM."""
-    ret_5 = feats.get("ret_5m", 0)
+    """Mirror each persona's style with calibrated heuristics — used when no LLM.
+
+    Key design decisions:
+    - macd_diff is in raw dollar terms (BTC ≈ $107k → diff can be $100-500).
+      We use only the SIGN so a dollar-scale term can't dominate the score.
+    - rsi_extreme / rsi_neutral: at RSI extremes (>70 or <30), momentum signals
+      are suppressed (likely exhausted) and the Contrarian's fade signal grows.
+    - Confidence uses tanh(|score| * 3) for smooth bounded output rather than
+      min(0.9, |score| * 80) which saturated at max for any non-trivial score.
+    """
+    ret_5  = feats.get("ret_5m", 0)
     ret_15 = feats.get("ret_15m", 0)
     ret_60 = feats.get("ret_60m", 0)
-    rsi = feats.get("rsi_14", 50)
+    rsi    = feats.get("rsi_14", 50)
     macd_d = feats.get("macd_diff", 0)
-    bbp = feats.get("bb_pctb", 0.5)
-    vol_z = feats.get("vol_z", 0)
-    ema_r = feats.get("ema_ratio", 0)
+    bbp    = feats.get("bb_pctb", 0.5)
+    vol_z  = feats.get("vol_z", 0)
+    ema_r  = feats.get("ema_ratio", 0)
+
+    # Dollar-scale MACD: use direction only
+    macd_sign = 1.0 if macd_d > 0 else (-1.0 if macd_d < 0 else 0.0)
+
+    # RSI extremity: 0 at RSI=50 (neutral), 1 at RSI=75 or RSI=25 (extreme)
+    rsi_extreme = min(1.0, abs(rsi - 50) / 25)
+    # Momentum is trusted in the neutral zone, suppressed at extremes
+    rsi_neutral = 1.0 - rsi_extreme
 
     if persona == "TapeReader":
-        score = 4 * ret_5 + 0.6 * macd_d + 0.03 * (rsi - 50)
+        # Momentum-following — but yields at overbought/oversold (don't chase tops)
+        score = (2.0 * ret_5 + 0.08 * macd_sign + 0.03 * (rsi - 50)) * rsi_neutral
+
     elif persona == "Contrarian":
-        score = -3 * ret_5 - 0.05 * (rsi - 50) - 2 * (bbp - 0.5)
+        # Mean-reversion: fade RSI extremes and strong recent momentum
+        # rsi_fade > 0 when oversold (RSI<50, expect bounce), < 0 when overbought
+        rsi_fade = -(rsi - 50) / 25          # -1 at RSI=75 (short), +1 at RSI=25 (buy)
+        score = (0.6 * rsi_fade - 2.0 * ret_5 - 1.5 * (bbp - 0.5)) * rsi_extreme
+        # NOTE: Contrarian is only active at RSI extremes (* rsi_extreme)
+
     elif persona == "MicroQuant":
+        # Candle anatomy + volume: upper wick bearish, lower wick bullish
+        vol_sign = 1.0 if ret_5 >= 0 else -1.0
         score = (
-            -1.0 * feats.get("upper_wick", 0)
-            + 1.0 * feats.get("lower_wick", 0)
-            + 0.3 * vol_z * (1 if ret_5 >= 0 else -1)
+            -1.5 * feats.get("upper_wick", 0)
+            + 1.5 * feats.get("lower_wick", 0)
+            + 0.15 * vol_z * vol_sign
         )
+
     elif persona == "MacroBias":
-        score = 3 * ret_60 + 2 * ret_15 + 1.5 * ema_r
-    else:  # SentimentBot
+        # Slow trend: ema_ratio is tiny (~0.001–0.005) — scale it to be meaningful
+        score = 3.0 * ret_60 + 2.0 * ret_15 + 200.0 * ema_r
+
+    else:  # SentimentBot — no live feed, always neutral
         return Vote("SentimentBot", "neutral", 0.15, "no live feed")
 
-    if score > 0.0015:
-        return Vote(persona, "up", min(0.9, abs(score) * 80), "score>0")
-    if score < -0.0015:
-        return Vote(persona, "down", min(0.9, abs(score) * 80), "score<0")
-    return Vote(persona, "neutral", 0.3, "weak signal")
+    # Confidence: tanh gives smooth bounded output.
+    # score ≈ 0.05 → conf ≈ 0.15 | score ≈ 0.2 → conf ≈ 0.54 | score ≈ 0.5 → conf ≈ 0.83
+    conf = round(min(0.80, math.tanh(abs(score) * 3)), 2)
+
+    # Only declare a directional opinion if the score clears a small noise floor
+    NOISE_FLOOR = 0.02
+    if score > NOISE_FLOOR:
+        return Vote(persona, "up",   conf, "score>0")
+    if score < -NOISE_FLOOR:
+        return Vote(persona, "down", conf, "score<0")
+    return Vote(persona, "neutral", 0.12, "weak signal")
 
 
 # ───────────────────────── LLM-backed personas ─────────────────────────

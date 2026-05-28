@@ -210,13 +210,32 @@ class BTCDirectionModel:
 
     @staticmethod
     def _fallback(row: pd.Series) -> float:
-        """Hand-calibrated logistic — used when no trained model exists yet."""
+        """Hand-calibrated logistic — used when no trained model exists yet.
+
+        Design: blend momentum (trusted in neutral RSI) with mean-reversion at
+        extremes.  Raw macd_diff is in dollar terms ($100-500 for BTC), so we
+        use only its sign — otherwise it completely dominates the formula and
+        the model reduces to a pure MACD follower with no real signal.
+        """
+        rsi = float(row["rsi_14"])
+
+        # 0 at RSI=50 (neutral), 1 at RSI=70/30 (extreme)
+        rsi_extreme = min(1.0, abs(rsi - 50) / 20)
+        rsi_neutral = 1.0 - rsi_extreme
+
+        # MACD direction only — sign tells us trend direction without dollar scale
+        raw_macd = row["macd_diff"]
+        macd_sign = math.copysign(0.2, raw_macd) if raw_macd != 0 else 0.0
+
+        # ema_ratio is tiny (~0.001–0.005) — scale up to be meaningful
+        ema_contribution = 200.0 * float(row["ema_ratio"])
+
         z = (
-            5.0 * row["ret_5m"]
-            + 2.0 * row["ret_15m"]
-            + 0.8 * row["macd_diff"]
-            + 0.04 * (row["rsi_14"] - 50)
-            + 0.5 * row["ema_ratio"]
+            4.0 * row["ret_5m"]  * rsi_neutral   # momentum, suppressed at extremes
+            + 2.0 * row["ret_15m"] * rsi_neutral  # 15-min confirmation
+            + macd_sign                            # ±0.2 directional bonus from MACD
+            - 0.04 * (rsi - 50) * rsi_extreme     # mean-revert: fade overbought/oversold
+            + ema_contribution                     # slow trend bias from EMA crossover
         )
         return 1.0 / (1.0 + math.exp(-z))
 

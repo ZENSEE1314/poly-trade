@@ -1,5 +1,6 @@
 import asyncio
 import json
+import random
 import traceback
 from datetime import datetime, timezone, timedelta
 
@@ -1016,24 +1017,37 @@ async def demo_tick(
 
     ws = current_window_ts()
 
-    # Try cached forecast from Redis
+    # ── Fetch prediction, matching the trade window to the prediction window ──
+    # Prediction cycle stores key = next_window_ts() at the time it runs.
+    # We must place the trade for THAT same window so the reconciler evaluates
+    # the correct 5-minute period.  Mismatch → wrong win/lose outcomes.
     import json as _json, redis as _redis
     _r = _redis.from_url(_settings.REDIS_URL, decode_responses=True)
-    cached = _r.get(f"btc_oracle:pred:{ws + 300}") or _r.get(f"btc_oracle:pred:{ws}")
-    if cached:
-        p_up = _json.loads(cached)["p_up"]
+
+    cached_next = _r.get(f"btc_oracle:pred:{ws + 300}")
+    cached_curr = _r.get(f"btc_oracle:pred:{ws}")
+
+    if cached_next:
+        # A fresh prediction exists for the NEXT window — trade on that window
+        p_up    = _json.loads(cached_next)["p_up"]
+        ws_trade = ws + 300
+    elif cached_curr:
+        # Fallback: prediction for the CURRENT window (made 5 min ago)
+        p_up    = _json.loads(cached_curr)["p_up"]
+        ws_trade = ws
     else:
-        # Run inline forecast
+        # Nothing cached — run inline forecast for next window
         from ..ai.engine import forecast_for_window
         from ..services.polymarket import next_window_ts
         fc = await forecast_for_window(next_window_ts())
-        p_up = fc.p_up
+        p_up     = fc.p_up
+        ws_trade = ws + 300
 
     MIN_CONFIDENCE = 0.30           # only trade when |p_up-0.5|*2 > this
     conf = abs(p_up - 0.5) * 2
     if conf < MIN_CONFIDENCE:
         return {
-            "window_ts": ws,
+            "window_ts": ws_trade,
             "p_up": round(p_up, 4),
             "placed": 0,
             "skipped": True,
@@ -1041,9 +1055,7 @@ async def demo_tick(
         }
 
     side = "up" if p_up >= 0.5 else "down"
-    slug = f"btc-updown-5m-{ws}"
-    POLY_FEE = 0.02
-    now = datetime.now(timezone.utc)
+    slug = f"btc-updown-5m-{ws_trade}"
     placed = []
 
     users = db.execute(
@@ -1055,6 +1067,11 @@ async def demo_tick(
         if not profile:
             continue
 
+        # One demo trade per user per window — idempotency guard
+        lock_key = f"btc_oracle:demo:{ws_trade}:{user.id}"
+        if not _r.set(lock_key, "1", nx=True, ex=700):
+            continue   # already placed for this window
+
         stake = min(float(getattr(profile, "max_stake_usdc", 100.0)), 100.0)
         sim_price = _sim_ask(p_up, side)
         tokens = round(stake / sim_price, 6)
@@ -1062,7 +1079,7 @@ async def demo_tick(
         # status=filled — reconciler sets real won/lost after window closes
         trade = Trade(
             user_id=user.id,
-            window_ts=ws,
+            window_ts=ws_trade,
             market_slug=slug,
             side=side,
             stake_usdc=stake,
@@ -1080,11 +1097,10 @@ async def demo_tick(
 
     db.commit()
 
-    # NOTE: orphaned "filled" trades are resolved by the Celery reconciler using
-    # real BTC klines — never by random draw. Use /api/admin/fix-outcomes to
-    # correct any historical wrong outcomes.
+    # NOTE: filled trades are resolved by the reconciler using real BTC klines.
+    # Never random. Use /api/admin/fix-outcomes to correct historical wrong outcomes.
     return {
-        "window_ts": ws,
+        "window_ts": ws_trade,
         "side": side,
         "p_up": round(p_up, 4),
         "placed": len(placed),
