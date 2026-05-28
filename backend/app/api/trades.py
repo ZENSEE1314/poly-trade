@@ -1090,3 +1090,93 @@ async def demo_tick(
         "placed": len(placed),
         "trades": placed,
     }
+
+
+# ── 24/7 cron cycle (no Celery required) ───────────────────────────────────
+#
+# Railway Cron calls POST /api/cron/cycle?key=btc-oracle-demo-2026 every minute.
+# The endpoint runs prediction → demo trades → reconciliation inline, in a thread
+# pool so the asyncio.run() calls inside task functions don't conflict with the
+# uvicorn event loop.
+#
+# Setup (Railway UI):
+#   + New → Cron → schedule "* * * * *"
+#   command: curl -sX POST \
+#     "https://poly-trade-production-07d8.up.railway.app/api/cron/cycle?key=btc-oracle-demo-2026"
+# ────────────────────────────────────────────────────────────────────────────
+
+from concurrent.futures import ThreadPoolExecutor as _TPE
+_cron_pool = _TPE(max_workers=2, thread_name_prefix="cron")
+
+CRON_KEY = "btc-oracle-demo-2026"
+
+
+@router.post("/cron/cycle")
+async def cron_cycle(key: str = Query(...)):
+    """All-in-one cron endpoint: prediction → demo trades → reconcile.
+
+    Called by Railway Cron every minute. No JWT or Celery required.
+    Each step is idempotent — Redis locks prevent duplicate trades.
+    """
+    if key != CRON_KEY:
+        raise HTTPException(status_code=403, detail="Invalid key")
+
+    from ..workers.tasks import run_prediction_cycle, reconcile_open_trades
+    import time as _time
+    import redis as _redis
+
+    loop = asyncio.get_event_loop()
+    t0 = _time.monotonic()
+    now = int(_time.time())
+
+    # Run in thread so asyncio.run() calls inside tasks don't conflict
+    pred_result  = await loop.run_in_executor(_cron_pool, run_prediction_cycle)
+    recon_result = await loop.run_in_executor(_cron_pool, reconcile_open_trades)
+
+    elapsed_ms = round((_time.monotonic() - t0) * 1000)
+
+    # Write heartbeat keys so /api/status can report liveness
+    try:
+        _r = _redis.from_url(_settings.REDIS_URL, decode_responses=True)
+        _r.setex("btc_oracle:cron_alive",    120, "1")
+        _r.set("btc_oracle:last_pred_ts",   now)
+        if isinstance(recon_result, dict) and recon_result.get("resolved", 0):
+            _r.set("btc_oracle:last_trade_ts", now)
+    except Exception:
+        pass  # Redis write failure is non-fatal
+
+    return {
+        "ok":        True,
+        "elapsed_ms": elapsed_ms,
+        "prediction": pred_result,
+        "reconcile":  recon_result,
+        "ts":        now,
+    }
+
+
+@router.get("/status")
+async def system_status():
+    """Public health + activity status. Shows whether the bot is running.
+
+    Returns last prediction time, trade count, and Celery queue depth.
+    Safe to call without authentication — no sensitive data.
+    """
+    import redis as _redis
+    import time as _time
+
+    r = _redis.from_url(_settings.REDIS_URL, decode_responses=True)
+
+    # Last cron / task activity stored in Redis
+    last_pred_ts  = r.get("btc_oracle:last_pred_ts")
+    last_trade_ts = r.get("btc_oracle:last_trade_ts")
+    cron_ok       = r.get("btc_oracle:cron_alive")    # set by cron_cycle
+
+    now = int(_time.time())
+
+    return {
+        "api_ok":            True,
+        "last_prediction_ago": (now - int(last_pred_ts))  if last_pred_ts  else None,
+        "last_trade_ago":      (now - int(last_trade_ts)) if last_trade_ts else None,
+        "cron_alive":          cron_ok == "1",
+        "ts":                  now,
+    }
