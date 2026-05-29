@@ -374,19 +374,26 @@ async def manual_trade(
 
 @router.get("/btc/price")
 async def btc_price(_: User = Depends(get_current_user)):
-    """Lightweight real-time BTC spot price from Binance. Polled every 15 s by the dashboard."""
+    """Real-time BTC spot price from Kraken (Binance blocked on EU servers)."""
     import httpx
     try:
-        async with httpx.AsyncClient(timeout=5) as c:
-            r = await c.get("https://api.binance.com/api/v3/ticker/24hr",
-                            params={"symbol": "BTCUSDT"})
-            d = r.json()
+        async with httpx.AsyncClient(timeout=5, verify=False) as c:
+            r = await c.get("https://api.kraken.com/0/public/Ticker",
+                            params={"pair": "XBTUSD"})
+            r.raise_for_status()
+            info = r.json()["result"]["XXBTZUSD"]
+            last_price = float(info["c"][0])
+            open_24h   = float(info["o"])
+            high_24h   = float(info["h"][1])
+            low_24h    = float(info["l"][1])
+            volume_24h = float(info["v"][1])
+            change_pct = ((last_price - open_24h) / open_24h * 100) if open_24h else 0
             return {
-                "price":       float(d["lastPrice"]),
-                "change_pct":  float(d["priceChangePercent"]),
-                "high_24h":    float(d["highPrice"]),
-                "low_24h":     float(d["lowPrice"]),
-                "volume_24h":  float(d["quoteVolume"]),
+                "price":       last_price,
+                "change_pct":  round(change_pct, 4),
+                "high_24h":    high_24h,
+                "low_24h":     low_24h,
+                "volume_24h":  volume_24h,
             }
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Price fetch failed: {exc}")
