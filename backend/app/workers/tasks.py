@@ -40,7 +40,7 @@ SSE_CHANNEL = "btc_oracle:events"
 # NOTE: was 0.30 before the heuristic recalibration. New heuristics output
 # properly-bounded confidence (no saturation), so a lower threshold captures
 # the same quality trades that previously required 0.30 with the old inflated scores.
-MIN_DEMO_CONFIDENCE = 0.12
+MIN_DEMO_CONFIDENCE = 0.05
 
 
 def _publish(event: dict) -> None:

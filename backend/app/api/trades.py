@@ -1043,7 +1043,7 @@ async def demo_tick(
         p_up     = fc.p_up
         ws_trade = ws + 300
 
-    MIN_CONFIDENCE = 0.12           # only trade when |p_up-0.5|*2 > this
+    MIN_CONFIDENCE = 0.05           # only trade when |p_up-0.5|*2 > this
     conf = abs(p_up - 0.5) * 2
     if conf < MIN_CONFIDENCE:
         return {
