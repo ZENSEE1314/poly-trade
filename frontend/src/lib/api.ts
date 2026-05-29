@@ -52,6 +52,7 @@ export const api = {
   updateProfile: (p: any) => req("/api/profile", { method: "PATCH", body: JSON.stringify(p) }),
   predictions: () => req<any[]>("/api/predictions/latest"),
   myTrades: (limit = 500) => req<any[]>(`/api/trades/mine?limit=${limit}`),
+  predictionsHistory: (limit = 100) => req<any[]>(`/api/predictions/history?limit=${limit}`),
   myStats: () => req<any>("/api/stats/mine"),
   manualTrade: (side: "up" | "down", stake: number) =>
     req<any>("/api/trades/manual", { method: "POST", body: JSON.stringify({ side, stake }) }),

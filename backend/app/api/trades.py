@@ -66,6 +66,63 @@ def latest_predictions(
     ]
 
 
+@router.get("/predictions/history")
+def predictions_history(
+    limit: int = 100,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Predictions + whether a trade was placed. Powers the History skip rows."""
+    preds = (
+        db.execute(select(Prediction).order_by(desc(Prediction.id)).limit(limit))
+        .scalars()
+        .all()
+    )
+    if not preds:
+        return []
+
+    window_tss = [p.window_ts for p in preds]
+    trades = (
+        db.execute(
+            select(Trade).where(
+                Trade.user_id == user.id,
+                Trade.window_ts.in_(window_tss),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    trade_by_window = {t.window_ts: t for t in trades}
+
+    MIN_CONF = 0.05
+    rows = []
+    for p in preds:
+        conf = round(abs(p.p_up - 0.5) * 2, 4)
+        trade = trade_by_window.get(p.window_ts)
+        rows.append({
+            "window_ts":  p.window_ts,
+            "p_up":       round(p.p_up, 4),
+            "confidence": conf,
+            "side":       "up" if p.p_up >= 0.5 else "down",
+            "btc_price":  p.btc_price,
+            "traded":     trade is not None,
+            "trade":      {
+                "id":            trade.id,
+                "stake_usdc":    trade.stake_usdc,
+                "avg_price":     trade.avg_price,
+                "status":        trade.status,
+                "pnl_usdc":      trade.pnl_usdc,
+                "is_paper":      trade.is_paper,
+            } if trade else None,
+            "skip_reason": (
+                None if trade
+                else "low_confidence" if conf < MIN_CONF
+                else "window_lock"   # traded in window but not for this user
+            ),
+        })
+    return rows
+
+
 @router.get("/trades/mine")
 def my_trades(
     limit: int = 500,
