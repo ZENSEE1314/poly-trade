@@ -36,8 +36,11 @@ LOCK_KEY = "btc_oracle:lock:{ws}:{user_id}"
 SSE_CHANNEL = "btc_oracle:events"
 
 # Only trade when the model has at least this much conviction.
-# conf = abs(p_up - 0.5) * 2  →  0.30 means p_up < 0.35 or p_up > 0.65
-MIN_DEMO_CONFIDENCE = 0.30
+# conf = abs(p_up - 0.5) * 2  →  0.12 means p_up < 0.44 or p_up > 0.56
+# NOTE: was 0.30 before the heuristic recalibration. New heuristics output
+# properly-bounded confidence (no saturation), so a lower threshold captures
+# the same quality trades that previously required 0.30 with the old inflated scores.
+MIN_DEMO_CONFIDENCE = 0.12
 
 
 def _publish(event: dict) -> None:
