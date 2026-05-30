@@ -15,11 +15,13 @@ const POLY_URL = "https://polymarket.com";
 export default function Wallet() {
   const [wallet, setWallet] = useState<any | null>(null);
   const [form, setForm] = useState({ address: "", funder: "", api_key: "", api_secret: "", api_passphrase: "" });
+  const [pkForm, setPkForm] = useState({ address: "", private_key: "", funder: "", ack_risk: false });
   const [msg, setMsg] = useState("");
   const [isError, setIsError] = useState(false);
   const [polyRejected, setPolyRejected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [showManual, setShowManual] = useState(false);
+  const [showPk, setShowPk] = useState(false);
 
   async function refresh() {
     try { setWallet(await api.me.wallet()); }
@@ -143,6 +145,19 @@ export default function Wallet() {
     } catch (e: any) { setErr("Error: " + e.message); }
   }
 
+  async function linkPrivateKey() {
+    setMsg(""); setIsError(false); setPolyRejected(false);
+    if (!pkForm.ack_risk) { setErr("Please tick the risk acknowledgement."); return; }
+    if (!pkForm.private_key.startsWith("0x") || pkForm.private_key.length < 60) {
+      setErr("Private key must start with 0x and be 64 hex chars."); return;
+    }
+    try {
+      await api.linkPrivateKey({ ...pkForm, ack_risk: true });
+      setSuccess("Wallet linked in private-key mode ✓ — bot will now place real orders.");
+      refresh();
+    } catch (e: any) { setErr("Error: " + e.message); }
+  }
+
   async function unlink() {
     if (!confirm("Unlink wallet? Auto-trading will pause until you re-link.")) return;
     await api.unlinkWallet();
@@ -248,7 +263,7 @@ export default function Wallet() {
             </div>
 
             {/* Manual key entry */}
-            <div>
+            <div style={{ borderBottom: "1px solid #1d2735", paddingBottom: 16, marginBottom: 16 }}>
               <button
                 onClick={() => setShowManual(v => !v)}
                 style={{ background: "none", border: "none", color: "#9aa6b2", cursor: "pointer",
@@ -279,6 +294,49 @@ export default function Wallet() {
                   <Field label="API Passphrase" value={form.api_passphrase} type="password"
                          set={v => setForm({ ...form, api_passphrase: v })} />
                   <button onClick={linkManual} style={btnPrimary}>Link wallet</button>
+                </>
+              )}
+            </div>
+
+            {/* ── Private Key mode (for 24/7 auto-trading) ── */}
+            <div>
+              <button
+                onClick={() => setShowPk(v => !v)}
+                style={{ background: "none", border: "none", color: "#e3b341", cursor: "pointer",
+                         fontSize: 13, padding: 0, textAlign: "left", display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: 18 }}>⚡</span>
+                {showPk ? "▾" : "▸"} Private key — for 24/7 auto-trading
+              </button>
+
+              {showPk && (
+                <>
+                  <div style={{ marginTop: 10, fontSize: 12, lineHeight: 1.6,
+                                background: "#1a1008", borderRadius: 6, padding: "10px 12px",
+                                border: "1px solid #5d4008", color: "#e3b341" }}>
+                    ⚠️ <b>Use a dedicated bot wallet — NOT your main wallet.</b><br />
+                    In MetaMask: <b>Add account → Create account</b> → transfer only as much USDC as you want the bot to trade with.<br />
+                    Export its private key from <b>Account Details → Show private key</b>.<br />
+                    The private key is encrypted and stored securely on the server.
+                  </div>
+                  <Field label="Wallet address (0x…)" value={pkForm.address}
+                         set={v => setPkForm({ ...pkForm, address: v })} />
+                  <Field label="Private key (0x… — 64 hex chars)" value={pkForm.private_key} type="password"
+                         set={v => setPkForm({ ...pkForm, private_key: v })} />
+                  <Field label="Funder address (leave blank if same as wallet)" value={pkForm.funder}
+                         set={v => setPkForm({ ...pkForm, funder: v })} />
+                  <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 14,
+                                  fontSize: 12, color: "#9aa6b2", cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={pkForm.ack_risk}
+                      onChange={e => setPkForm({ ...pkForm, ack_risk: e.target.checked })}
+                      style={{ marginTop: 2, flexShrink: 0 }}
+                    />
+                    I understand this wallet's private key will be stored encrypted on the server and used to sign real Polymarket orders automatically.
+                  </label>
+                  <button onClick={linkPrivateKey} style={{ ...btnPrimary, background: "#e3b341", color: "#000" }}>
+                    ⚡ Link for live trading
+                  </button>
                 </>
               )}
             </div>
