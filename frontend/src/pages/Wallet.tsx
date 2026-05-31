@@ -148,11 +148,14 @@ export default function Wallet() {
   async function linkPrivateKey() {
     setMsg(""); setIsError(false); setPolyRejected(false);
     if (!pkForm.ack_risk) { setErr("Please tick the risk acknowledgement."); return; }
-    if (!pkForm.private_key.startsWith("0x") || pkForm.private_key.length < 60) {
-      setErr("Private key must start with 0x and be 64 hex chars."); return;
+    // MetaMask exports keys without 0x prefix — normalise before submitting
+    let pk = pkForm.private_key.trim();
+    if (!pk.startsWith("0x")) pk = "0x" + pk;
+    if (pk.length !== 66) {
+      setErr(`Private key should be 64 hex characters (got ${pk.length - 2}). Check you copied the full key.`); return;
     }
     try {
-      await api.linkPrivateKey({ ...pkForm, ack_risk: true });
+      await api.linkPrivateKey({ ...pkForm, private_key: pk, ack_risk: true });
       setSuccess("Wallet linked in private-key mode ✓ — bot will now place real orders.");
       refresh();
     } catch (e: any) { setErr("Error: " + e.message); }
